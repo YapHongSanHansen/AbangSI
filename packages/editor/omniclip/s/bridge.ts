@@ -216,6 +216,37 @@ function refreshCanvas(ctx: OmniContext) {
 	const compositor = ctx.controllers.compositor
 	compositor.compose_effects(ctx.state.effects, ctx.state.timecode)
 	compositor.seek(ctx.state.timecode, true).then(() => compositor.compose_effects(ctx.state.effects, ctx.state.timecode))
+	showPausedFrames(ctx)
+}
+
+/**
+ * Upstream only uploads video frames to the PIXI texture while playing, so a freshly imported (paused) clip
+ * shows a black preview until the user presses play. Push the current frame once it is decodable.
+ */
+function showPausedFrames(ctx: OmniContext) {
+	const compositor = ctx.controllers.compositor
+	for (const effect of ctx.state.effects) {
+		if (effect.kind !== "video") continue
+		const sprite = compositor.managers.videoManager.get(effect.id)?.sprite
+		const base = sprite?.texture.baseTexture as any
+		const el = base?.resource?.source as HTMLVideoElement | undefined
+		if (!el) continue
+		const push = () => {
+			try {
+				base.resource?.update?.()
+				base.update?.()
+				compositor.compose_effects(ctx.state.effects, ctx.state.timecode)
+			} catch {}
+		}
+		el.addEventListener("loadeddata", push, {once: true})
+		el.addEventListener("seeked", push, {once: true})
+		if (el.readyState >= 2) push()
+		else {
+			// a paused element with preload=metadata never decodes a frame; a tiny seek forces one
+			el.preload = "auto"
+			el.currentTime = el.currentTime || 0.001
+		}
+	}
 }
 
 /** Puts the video on the timeline. "Main" video track = bottom track; overlays (text) go on track 0 above it. */
@@ -590,6 +621,7 @@ export function startBridge() {
 		const projectId = currentProjectId()
 		if (!projectId) return
 		const ctx = await readyContext()
+		showPausedFrames(ctx)
 		const local = hasLocalProject(projectId)
 		post({type: "reelforge:ready", projectId, hasLocalProject: local, imports: readImports(projectId), effects: ctx.state.effects.length})
 		if (embedded) {

@@ -59,7 +59,6 @@
     "mp4box": "^0.5.2",
     "opfs-tools": "^0.7.0",
     "pixi.js": "^7.4.2",
-    "posthog-js": "^1.141.3",
     "sparrow-rtc": "^0.2.3",
     "wavesurfer.js": "^7.7.5",
     "web-demuxer": "^1.0.1"

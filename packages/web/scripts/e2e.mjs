@@ -167,7 +167,66 @@ try {
 	})
 	check(afterReload.videos === 1 && afterReload.texts === 1, `reload keeps the edit and does not re-import (${JSON.stringify(afterReload)})`)
 
-	// 6. optional deep link
+	// 6. "another version arrived": add as new clip, then replace the selected clip
+	const videoIds = () => frame2.evaluate(() => window.reelforge.context().state.effects.filter(e => e.kind === "video").map(e => e.id))
+	const before = await videoIds()
+	await page.click("text=New version")
+	await page.click("[data-testid=new-version-dialog] button.primary")
+	await page.waitForSelector("[data-testid=nv-append]", {timeout: 60_000})
+	await page.click("[data-testid=nv-append]")
+	await frame2.waitForFunction(n => window.reelforge.context().state.effects.filter(e => e.kind === "video").length === n, before.length + 1, {timeout: 60_000})
+	const afterAppend = await videoIds()
+	check(afterAppend.length === before.length + 1, `"Add as new clip" appended a clip (${before.length} -> ${afterAppend.length} video clips)`)
+	const appended = afterAppend.find(id => !before.includes(id))
+	await frame2.evaluate(id => { const c = window.reelforge.context(); c.controllers.timeline.set_selected_effect(c.state.effects.find(e => e.id === id), c.state) }, appended)
+	await page.waitForTimeout(2000) // selection is reported to the site every 1.5 s
+	await page.click("text=New version")
+	await page.click("[data-testid=new-version-dialog] button.primary")
+	await page.waitForSelector("[data-testid=nv-replace]:not([disabled])", {timeout: 60_000})
+	await page.click("[data-testid=nv-replace]")
+	await frame2.waitForFunction(id => !window.reelforge.context().state.effects.some(e => e.id === id), appended, {timeout: 60_000})
+	const afterReplace = await videoIds()
+	check(afterReplace.length === afterAppend.length && !afterReplace.includes(appended), `"Replace selected clip" swapped the selected clip (${afterReplace.length} video clips)`)
+	const library = await frame2.evaluate(() => window.reelforge.context().controllers.media.size)
+	check(library >= 1, `originals stay in the media library (${library} file(s))`)
+	await page.screenshot({path: path.join(out, "6-new-version.png")})
+
+	// 7. save to the server, reopen in a FRESH browser profile (no local storage / IndexedDB)
+	await page.click("[data-testid=save-project]")
+	await page.waitForFunction(() => document.querySelector("[data-testid=save-state]")?.textContent?.startsWith("Saved"), null, {timeout: 120_000})
+	const savedState = await frame2.evaluate(() => window.reelforge.context().state.effects.map(e => e.kind).sort().join(","))
+	const ctx2 = await browser.newContext({viewport: {width: 1600, height: 950}})
+	const page2 = await ctx2.newPage()
+	await page2.goto(`${base}/studio?project=${encodeURIComponent(imported.projectId)}`)
+	const h2 = await page2.waitForSelector("[data-testid=editor-frame]", {timeout: 60_000})
+	const f2 = await h2.contentFrame()
+	await f2.waitForFunction(() => window.reelforge?.context()?.state.effects.length > 0, null, {timeout: 180_000})
+	await page2.waitForTimeout(2000)
+	const reopened = await f2.evaluate(() => {
+		const c = window.reelforge.context()
+		return {kinds: c.state.effects.map(e => e.kind).sort().join(","), media: c.controllers.media.size, settings: c.state.settings,
+			allFiles: c.state.effects.filter(e => e.file_hash).every(e => c.controllers.media.get(e.file_hash))}
+	})
+	check(reopened.kinds === savedState && reopened.allFiles, `project reopened in a fresh browser with its media (${JSON.stringify(reopened)})`)
+	await page2.screenshot({path: path.join(out, "7-reopened-fresh-browser.png")})
+	await ctx2.close()
+
+	// 8. error states
+	const badHost = "https" + "://evil.example.com/a.mp4"
+	for (const [url, expect] of [
+		[`/studio?gen=mock-fail-${Date.now()}&mock=1`, "Generation failed"],
+		[`/studio?gen=mock-expired-${Date.now()}`, "Video URL expired"],
+		[`/studio?gen=evil1&video=${encodeURIComponent(badHost)}`, "Video host not allowed"],
+		[`/studio?gen=does-not-exist-${Date.now()}`, ""],
+	]) {
+		await page.goto(`${base}${url}`)
+		const el = await page.waitForSelector("[data-testid=studio-error]", {timeout: 60_000})
+		const text = (await el.textContent()) ?? ""
+		check(!expect || text.includes(expect), `error state for ${url.split("&")[0]}: "${text.slice(0, 90)}"`)
+	}
+	await page.screenshot({path: path.join(out, "8-error-state.png")})
+
+	// 9. optional deep link
 	if (process.env.E2E_VIDEO_URL) {
 		const gen = `deeplink-${Date.now().toString(36)}`
 		await page.goto(`${base}/studio?gen=${gen}&video=${encodeURIComponent(process.env.E2E_VIDEO_URL)}`)

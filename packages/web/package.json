@@ -9,6 +9,7 @@
     "dev:server": "tsx watch server/src/index.ts",
     "dev:client": "vite --config client/vite.config.ts",
     "dev:editor": "pnpm --filter @reelforge/editor serve",
+    "start": "tsx server/src/index.ts",
     "start:server": "tsx server/src/index.ts",
     "build": "pnpm --filter @reelforge/editor build && tsc -p server/tsconfig.json && tsc -p client/tsconfig.json && vite build --config client/vite.config.ts",
     "mock:sample": "node scripts/make-sample.mjs",
