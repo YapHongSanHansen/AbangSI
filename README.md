@@ -84,6 +84,26 @@ The collector withdraws each escrow automatically after its `unlock_time` (~60 m
 quote, ~50 min after an x402 quote). Refunds: if no result is submitted before `submit_result_time`, the
 buyer reclaims via `WithdrawRefund`; disputes go to the escrow's admin multisig.
 
+## Pricing and revisions
+
+Every request is quoted individually (`POST /quote` is free) and the quote is what gets signed into the escrow terms:
+
+```
+price_tUSDM = (0.40 base + 0.12 × seconds + complexity surcharge + 0.15 × extra scenes) × resolution factor
+price_tADA  = price_tUSDM × 5   (x402 tADA route, minimum 2 tADA)
+```
+
+- **Length** 4–15 s (input `duration`, or parsed from the prompt, e.g. "10s").
+- **Resolution** 480p ×0.8 · 720p ×1 · 1080p ×1.6 (input `resolution`, or "1080p" in the prompt).
+- **Complexity** from word count, scene cuts ("then", "cut to", ";") and features (camera moves, people, text/logos, effects, slow motion): simple +0 · standard +0.25 · complex +0.60.
+- A simple 5 s 720p reel is 1 tUSDM / 5 tADA; e.g. a 10 s 1080p multi-scene prompt with effects is 4 tUSDM / 20 tADA.
+- All rates are env-tunable (`PRICE_*`). The paid length/resolution are passed to Higgsfield, so buyers get what they paid for.
+
+**Revisions:** one hire covers up to `MAX_ITERATIONS_PER_HIRE` (default **5**) generations — the reel plus 4 revisions.
+On Sokosumi, comment on the delivered Task with the changes (or move it back to Ready); ReelForge replies "Revision n/5".
+API buyers use `POST /jobs/<job_id>/revisions {"instructions": "…"}`. After the 5th generation ReelForge asks for a rehire
+(new Task / new payment; the API returns HTTP 402). Revisions keep the paid specs; the on-chain result hash commits to the
+first delivery and each revision's hash is recorded on the job.
 ## Live proof (Cardano preprod, 2026-10-07)
 
 Seller (ReelForge) `addr_test1qqvgrrs63qmum4kpsmxcqunwv70cycelmx5gtvycs27huh0zyfy7f4d0qgfq59rv2kk5f86372fmh5fapkq29xvw48vscpdmhs`

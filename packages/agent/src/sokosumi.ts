@@ -16,6 +16,8 @@ import { ESCROW_ADDRESS, REGISTRY_POLICY_ID, TUSDM_UNIT } from "./constants.js";
 import { inputHash, issueTerms, newPurchaserNonce, type SignData } from "./masumi.js";
 import { big, store, type Job } from "./store.js";
 import { parseVideoInput } from "./video.js";
+import { quote, quoteSummary } from "./pricing.js";
+import { MAX_ITERATIONS, revise, revisionsLeft } from "./revisions.js";
 
 export const SOKOSUMI_API = optional("SOKOSUMI_API_URL", "https://api.preprod.sokosumi.com").replace(/\/+$/, "");
 
@@ -43,7 +45,7 @@ function taskPrompt(task: { name?: string | null; description?: string | null })
   return (desc || task.name || "").slice(0, 1000);
 }
 
-export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddress: string; sign: SignData; priceUnits: bigint }) {
+export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddress: string; sign: SignData }) {
   const key = optional("SOKOSUMI_COWORKER_API_KEY");
   const coworkerId = optional("SOKOSUMI_COWORKER_ID");
   if (!key || !coworkerId) { console.log("[coworker] SOKOSUMI_COWORKER_API_KEY / SOKOSUMI_COWORKER_ID not set — runtime disabled (pnpm sokosumi setup)"); return; }
@@ -52,6 +54,11 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
 
   async function event(taskId: string, body: Record<string, unknown>) {
     return core(key, "POST", `/v1/tasks/${encodeURIComponent(taskId)}/events`, body);
+  }
+  /** Status changes on an already-completed Task may be refused; fall back to a plain comment. */
+  async function statusEvent(taskId: string, body: { status: string; comment: string }) {
+    try { return await event(taskId, body); }
+    catch (e) { if ((e as { status?: number }).status && (e as { status: number }).status < 500) return event(taskId, { comment: body.comment }); throw e; }
   }
 
   async function pickUp(task: any) {
@@ -63,26 +70,29 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
       const parsed = parseVideoInput({ prompt, aspect_ratio: /16:9|landscape|youtube/i.test(prompt) ? "16:9" : /1:1|square/i.test(prompt) ? "1:1" : "9:16" });
       await event(taskId, { status: "RUNNING", comment: "ReelForge picked up this Task." });
       if (typeof parsed === "string") { await event(taskId, { status: "FAILED", comment: `ReelForge needs a video prompt: ${parsed}` }); return; }
+      const q = quote(parsed);
+      const input = { ...parsed, duration: q.durationSeconds, resolution: q.resolution };
+      const price = { tusdm: q.tusdm, ada: q.ada, summary: quoteSummary(q) };
       const nonce = newPurchaserNonce();
       // Core does not recompute the Task input hash; ReelForge commits to the Task itself (MIP-004 form).
       const hash = inputHash(nonce, { taskId, name: task.name ?? "", description: task.description ?? null });
       if (!paid) {
-        const job = store.create({ channel: "sokosumi", input: parsed, nonce, inputHash: hash, sokosumiTaskId: taskId, status: "running" });
+        const job = store.create({ channel: "sokosumi", input, price, nonce, inputHash: hash, sokosumiTaskId: taskId, status: "running" });
         store.update(job.id, {}, `Sokosumi task ${taskId} (unpaid rehearsal)`);
         return; // unpaid path is driven by runUnpaid()
       }
       const terms = await issueTerms({
         identifierFromPurchaser: nonce, inputHash: hash, agentIdentifier: opts.agentIdentifier, sellerAddress: opts.sellerAddress,
-        funds: [{ amount: opts.priceUnits.toString(), unit: TUSDM_UNIT }], sign: opts.sign,
+        funds: [{ amount: q.tusdmUnits.toString(), unit: TUSDM_UNIT }], sign: opts.sign,
       });
       const job = store.create({
-        channel: "sokosumi", input: parsed, nonce, inputHash: hash, sokosumiTaskId: taskId,
+        channel: "sokosumi", input, price, nonce, inputHash: hash, sokosumiTaskId: taskId,
         blockchainIdentifier: terms.blockchainIdentifier, agentIdentifier: opts.agentIdentifier, sellerVKey: terms.sellerVKey,
         expected: big({
           sellerAddress: opts.sellerAddress, referenceKey: terms.referenceKey, referenceSignature: terms.referenceSignature,
           sellerNonce: terms.sellerNonce, buyerNonce: nonce, agentIdentifier: opts.agentIdentifier, inputHash: hash,
           payByTime: String(terms.payByTime), submitResultTime: String(terms.submitResultTime), unlockTime: String(terms.unlockTime),
-          externalDisputeUnlockTime: String(terms.externalDisputeUnlockTime), unit: TUSDM_UNIT, amount: opts.priceUnits.toString(),
+          externalDisputeUnlockTime: String(terms.externalDisputeUnlockTime), unit: TUSDM_UNIT, amount: q.tusdmUnits.toString(),
         }),
       });
       const masumiPayment = {
@@ -93,8 +103,7 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
         Amounts: terms.RequestedFunds, paymentSourceType: terms.paymentSourceType, supportedPaymentSourceIndex: terms.supportedPaymentSourceIndex,
         PaymentSource: { network: "Preprod", policyId: REGISTRY_POLICY_ID, smartContractAddress: ESCROW_ADDRESS },
       };
-      const price = (Number(opts.priceUnits) / 1e6).toFixed(2);
-      const r = await event(taskId, { comment: `Payment requested: ${price} tUSDM into Masumi escrow (vested_pay). The reel is generated as soon as the funds are locked on Cardano preprod.`, masumiPayment });
+      const r = await event(taskId, { comment: `Quote: ${q.tusdm} tUSDM for a ${q.durationSeconds}s ${q.resolution} reel (${q.complexity.tier} prompt). Breakdown: ${q.breakdown.join("; ")}. Paid into Masumi escrow (vested_pay) on Cardano preprod; includes up to ${MAX_ITERATIONS} generations (the reel + ${MAX_ITERATIONS - 1} revisions). The reel is generated as soon as the funds are locked.`, masumiPayment });
       store.update(job.id, {}, `masumiPayment posted to Sokosumi task ${taskId} (event ${r?.data?.id ?? "?"})`);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -107,8 +116,8 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
   async function report(job: Job) {
     if (!job.sokosumiTaskId || job.log.some(l => l.includes("reported to Sokosumi"))) return;
     if (job.status === "completed" && job.result && job.resultTx && (job.resultConfirmed || job.resultTx === "unpaid")) {
-      await event(job.sokosumiTaskId, { status: "COMPLETED", comment: job.result });
-      store.update(job.id, {}, `reported to Sokosumi (COMPLETED); result hash ${job.resultHash} on chain in ${job.resultTx}`);
+      const r = await event(job.sokosumiTaskId, { status: "COMPLETED", comment: `${job.result}\n\nNeed changes? Comment on this Task with what to change (or move it back to Ready). This hire includes ${revisionsLeft(job)} more revision${revisionsLeft(job) === 1 ? "" : "s"}.` });
+      store.update(job.id, { sokosumiSeenAt: r?.data?.createdAt ?? new Date().toISOString() }, `reported to Sokosumi (COMPLETED); result hash ${job.resultHash} on chain in ${job.resultTx}`);
     } else if (job.status === "failed") {
       await event(job.sokosumiTaskId, { status: "FAILED", comment: `ReelForge failed: ${(job.error ?? "unknown").slice(0, 500)}` });
       store.update(job.id, {}, "reported to Sokosumi (FAILED)");
@@ -126,7 +135,42 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
     } catch (e) { store.update(job.id, { status: "failed", error: e instanceof Error ? e.message : String(e) }, "generation failed"); }
   }
 
+  /** New buyer comments (or a move back to READY) on a delivered Task = a revision request. */
+  const revising = new Set<string>();
+  async function checkRevisions(job: Job) {
+    if (!job.sokosumiTaskId || !job.sokosumiSeenAt || revising.has(job.id)) return;
+    if (Date.now() - job.updatedAt > 7 * 24 * 3600_000) return;
+    const body = await core(key, "GET", `/v1/tasks/${encodeURIComponent(job.sokosumiTaskId)}/events?limit=100`);
+    const events = list(body).filter((e: any) => e.createdAt > job.sokosumiSeenAt! && e.actor?.type !== "coworker");
+    const request = events.filter((e: any) => (typeof e.comment === "string" && e.comment.trim()) || e.status === "READY");
+    if (!request.length) { if (events.length) store.update(job.id, { sokosumiSeenAt: events.at(-1).createdAt }); return; }
+    const last = request.at(-1);
+    const instructions = request.map((e: any) => (e.comment ?? "").trim()).filter(Boolean).join(" ");
+    store.update(job.id, { sokosumiSeenAt: last.createdAt });
+    revising.add(job.id);
+    try {
+      const taskId = job.sokosumiTaskId;
+      if (revisionsLeft(job) <= 0) {
+        await statusEvent(taskId, { status: "COMPLETED", comment: `This hire included ${MAX_ITERATIONS} generations (the reel + ${MAX_ITERATIONS - 1} revisions) and all are used. To keep iterating, please hire ReelForge again with a new Task (a new quote and payment).` });
+        store.update(job.id, {}, "revision refused: limit reached (rehire required)");
+        return;
+      }
+      const n = MAX_ITERATIONS - revisionsLeft(job) + 1;
+      await statusEvent(taskId, { status: "RUNNING", comment: `Revision ${n}/${MAX_ITERATIONS} started${instructions ? `: "${instructions.slice(0, 200)}"` : " (new variation)"}.` });
+      const out = await revise(job.id, instructions);
+      const fresh = store.get(job.id)!;
+      if (out.ok) {
+        const r = await statusEvent(taskId, { status: "COMPLETED", comment: `${out.iteration.result}\n\nRevision ${out.iteration.n}/${MAX_ITERATIONS} delivered — ${out.left} revision${out.left === 1 ? "" : "s"} left on this hire.${out.left === 0 ? " After this, a new Task (rehire) is needed for more changes." : ""}` });
+        store.update(fresh.id, { sokosumiSeenAt: r?.data?.createdAt ?? new Date().toISOString() });
+      } else {
+        const r = await statusEvent(taskId, { status: "COMPLETED", comment: out.message });
+        store.update(fresh.id, { sokosumiSeenAt: r?.data?.createdAt ?? new Date().toISOString() });
+      }
+    } finally { revising.delete(job.id); }
+  }
+
   let ticking = false;
+  let tickCount = 0;
   async function tick() {
     if (ticking) return;
     ticking = true;
@@ -136,9 +180,10 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
       for (const job of store.all().filter(j => j.channel === "sokosumi")) {
         if (!paid && job.status === "running" && !job.result && !job.log.some(l => l.includes("generating (unpaid)"))) void runUnpaid(job);
         await report(job).catch(e => console.warn(`[coworker] report ${job.sokosumiTaskId}: ${e instanceof Error ? e.message : e}`));
+        if (tickCount % 2 === 0 && job.status === "completed" && job.resultConfirmed) void checkRevisions(job).catch(e => console.warn(`[coworker] revisions ${job.sokosumiTaskId}: ${e instanceof Error ? e.message : e}`));
       }
     } catch (error) { console.warn(`[coworker] poll: ${error instanceof Error ? error.message : error}`); }
-    finally { ticking = false; }
+    finally { ticking = false; tickCount++; }
   }
   setInterval(() => { void tick(); }, 15_000);
   void tick();

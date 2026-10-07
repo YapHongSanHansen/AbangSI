@@ -10,6 +10,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { optional, publicUrl, videoBackend } from "./config.js";
 import { DATA_DIR, type VideoInput } from "./store.js";
+import { requestedSpecs } from "./pricing.js";
 
 export const MEDIA_DIR = `${DATA_DIR}media/`;
 
@@ -25,6 +26,16 @@ export const INPUT_SCHEMA = {
       data: { values: ["9:16", "16:9", "1:1"], description: "9:16 for Reels/TikTok/Shorts" },
       validations: [{ validation: "min", value: "1" }, { validation: "max", value: "1" }],
     },
+    {
+      id: "duration", type: "option", name: "Length (seconds)",
+      data: { values: ["5", "10", "15"], description: "Longer reels cost more (priced per second)" },
+      validations: [{ validation: "optional", value: "true" }],
+    },
+    {
+      id: "resolution", type: "option", name: "Resolution",
+      data: { values: ["480p", "720p", "1080p"], description: "1080p costs more" },
+      validations: [{ validation: "optional", value: "true" }],
+    },
   ],
 };
 
@@ -38,11 +49,16 @@ export function parseVideoInput(raw: unknown): VideoInput | string {
   if (Array.isArray(ar)) ar = ar[0];
   if (typeof ar === "number") ar = ratios[ar];
   const aspect_ratio = (ratios as readonly unknown[]).includes(ar) ? (ar as VideoInput["aspect_ratio"]) : "9:16";
-  return { prompt, aspect_ratio };
+  const pick = (v: unknown, values: readonly string[]) => { if (Array.isArray(v)) v = v[0]; if (typeof v === "number" && !Number.isInteger(Number(values[v]))) v = values[v]; return v; };
+  const durRaw = pick(d.duration, ["5", "10", "15"]);
+  const duration = durRaw === undefined || durRaw === "" ? undefined : Number(durRaw);
+  const resRaw = pick(d.resolution, ["480p", "720p", "1080p"]);
+  const resolution = (["480p", "720p", "1080p"] as const).find(r => r === resRaw);
+  return { prompt, aspect_ratio, ...(Number.isFinite(duration) ? { duration } : {}), ...(resolution ? { resolution } : {}) };
 }
 
 type Hf = {
-  createVideo(o: { prompt: string; aspectRatio?: string; durationSeconds?: number; model?: string }): Promise<{ generationId: string }>;
+  createVideo(o: { prompt: string; aspectRatio?: string; durationSeconds?: number; model?: string; extraInput?: Record<string, unknown> }): Promise<{ generationId: string }>;
   waitForVideo(id: string, o: { timeoutMs: number; pollMs: number }): Promise<{ status: string; videoUrl?: string; error?: string }>;
 };
 let hf: Hf | null | undefined;
@@ -61,7 +77,9 @@ export async function generateVideo(input: VideoInput, deadlineMs: number): Prom
   let generationId = `mock-${Date.now()}`;
   let sourceUrl = SAMPLE_MP4;
   if (client) {
-    const created = await client.createVideo({ prompt: input.prompt, aspectRatio: input.aspect_ratio, model: optional("HIGGSFIELD_MODEL") || undefined });
+    // Deliver exactly what was paid for: the quoted length and resolution.
+    const spec = requestedSpecs({ prompt: input.prompt, duration: input.duration, resolution: input.resolution });
+    const created = await client.createVideo({ prompt: input.prompt, aspectRatio: input.aspect_ratio, durationSeconds: spec.durationSeconds, extraInput: { resolution: spec.resolution }, model: optional("HIGGSFIELD_MODEL") || undefined });
     generationId = created.generationId;
     const timeoutMs = Math.max(30_000, deadlineMs - Date.now());
     const done = await client.waitForVideo(generationId, { timeoutMs, pollMs: 5_000 });

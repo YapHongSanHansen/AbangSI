@@ -32,6 +32,8 @@ import { inputHash, issueTerms, NONCE_RE, resultHash, STATE } from "./masumi.js"
 import { big, store, type Job } from "./store.js";
 import { generateVideo, INPUT_SCHEMA, MEDIA_DIR, parseVideoInput, resultText } from "./video.js";
 import { startCoworkerRuntime } from "./sokosumi.js";
+import { quote, quoteSummary } from "./pricing.js";
+import { iterations, MAX_ITERATIONS, revise, revisionsLeft } from "./revisions.js";
 
 const seller = sellerWallet();
 const agentId = agentIdentifier();
@@ -54,7 +56,15 @@ const facilitatorClient: FacilitatorClient = optional("FACILITATOR_URL") && opti
 /** x402 escrow deadlines: video generation needs more than the 15-minute default. */
 const X402_DEADLINES = { submitResultAfterPayByMs: 30 * 60_000, unlockAfterPayByMs: 50 * 60_000, externalDisputeUnlockAfterPayByMs: 70 * 60_000 };
 
-function x402Offer(path: string, price: { amount: string; asset: string }) {
+/** Per-request x402 price from the request body (length, resolution, prompt complexity). */
+const dynamicPrice = (asset: "lovelace" | "tusdm") => async (ctx: { adapter: { getBody?: () => unknown } }) => {
+  const body = ctx.adapter.getBody?.() as Record<string, unknown> | undefined;
+  const input = parseVideoInput(body?.input_data ?? body);
+  const q = quote(typeof input === "string" ? { prompt: "invalid" } : input);
+  return asset === "lovelace" ? { amount: q.lovelace.toString(), asset: "lovelace" } : { amount: q.tusdmUnits.toString(), asset: TUSDM_X402_ASSET };
+};
+
+function x402Offer(path: string, price: ReturnType<typeof dynamicPrice>, label: string) {
   const server = new x402ResourceServer(facilitatorClient).register(NETWORK, new ServerScheme({
     masumi: {
       seller: seller.signer,
@@ -79,12 +89,12 @@ function x402Offer(path: string, price: { amount: string; asset: string }) {
       description: "ReelForge: one AI-generated video reel, paid into Masumi escrow", mimeType: "application/json",
     },
   });
-  return { path, price, server, http };
+  return { path, price: label, server, http };
 }
 
 const offers = [
-  ...(priceLovelace ? [x402Offer("/x402/generate", { amount: priceLovelace.toString(), asset: "lovelace" })] : []),
-  x402Offer("/x402/generate/tusdm", { amount: priceTusdmUnits.toString(), asset: TUSDM_X402_ASSET }),
+  ...(priceLovelace ? [x402Offer("/x402/generate", dynamicPrice("lovelace"), "tADA, per request")] : []),
+  x402Offer("/x402/generate/tusdm", dynamicPrice("tusdm"), "tUSDM, per request"),
 ];
 
 /** Records a verified x402 payment as a job (runs before settlement, and again on retries: idempotent). */
@@ -95,10 +105,13 @@ function x402Job(req: Request): Job {
   if (existing) return existing;
   const extra = payment.accepted.extra as unknown as CardanoExtraMasumi;
   const { terms } = extra;
-  const input = parseVideoInput((extra.inputCommitment.parts[0].content as { input_data: unknown }).input_data);
-  if (typeof input === "string") throw new Error(input);
+  const parsed = parseVideoInput((extra.inputCommitment.parts[0].content as { input_data: unknown }).input_data);
+  if (typeof parsed === "string") throw new Error(parsed);
+  const q = quote(parsed);
+  const input = { ...parsed, duration: q.durationSeconds, resolution: q.resolution };
   return store.create({
     channel: "x402", input, nonce: terms.buyerNonce, inputHash: terms.inputHash, lockTx: txHash,
+    price: { tusdm: q.tusdm, ada: (Number(payment.accepted.amount) / 1e6).toFixed(2), summary: payment.accepted.asset === "lovelace" ? `${(Number(payment.accepted.amount) / 1e6).toFixed(2)} tADA — ${quoteSummary(q)}` : quoteSummary(q) },
     blockchainIdentifier: extra.blockchainIdentifier, sellerVKey: paymentKeyHash(terms.sellerAddress),
     expected: big({
       sellerAddress: terms.sellerAddress, referenceKey: extra.referenceKey, referenceSignature: extra.referenceSignature,
@@ -277,7 +290,8 @@ app.use("/media", express.static(MEDIA_DIR, { immutable: true, maxAge: "365d", s
 
 const view = (j: Job) => ({
   job_id: j.id, id: j.id, channel: j.channel, status: j.status, input: j.input,
-  ...(j.status === "completed" && j.resultConfirmed ? { video_url: j.videoUrl, result: j.result } : {}),
+  price: j.price,
+  ...(j.status === "completed" && j.resultConfirmed ? { video_url: j.videoUrl, result: j.result, iterations: iterations(j).map(i => ({ n: i.n, video_url: i.videoUrl, instructions: i.instructions, result_hash: i.resultHash })), revisions_left: revisionsLeft(j), max_iterations: MAX_ITERATIONS } : {}),
   identifierFromPurchaser: j.nonce, input_hash: j.inputHash, result_hash: j.resultHash, blockchainIdentifier: j.blockchainIdentifier,
   escrow: ESCROW_ADDRESS, lock_tx: j.lockTx, result_tx: j.resultTx, collect_tx: j.collectTx, error: j.error, log: j.log,
   deadlines: j.expected && { payByTime: j.expected.payByTime, submitResultTime: j.expected.submitResultTime, unlockTime: j.expected.unlockTime, externalDisputeUnlockTime: j.expected.externalDisputeUnlockTime },
@@ -287,8 +301,9 @@ app.get("/", (_req, res) => {
   res.json({
     name: "ReelForge", description: "Prompt → AI video reel (Higgsfield). Masumi MIP-003 agent on Cardano preprod with x402 escrow payments.",
     network: NETWORK, agentIdentifier: agentId ?? null, seller: seller.address, escrow: ESCROW_ADDRESS,
-    endpoints: ["/availability", "/input_schema", "/start_job", "/status?job_id=", ...offers.map(o => o.path)],
-    x402: offers.map(o => ({ path: o.path, ...o.price })),
+    endpoints: ["/availability", "/input_schema", "/start_job", "/status?job_id=", "/quote", "/jobs/:id/revisions", ...offers.map(o => o.path)],
+    pricing: "per request: base + per-second length + prompt complexity, × resolution (POST /quote)", max_iterations_per_hire: MAX_ITERATIONS,
+    x402: offers.map(o => ({ path: o.path, price: o.price })),
   });
 });
 app.get("/availability", (_req, res) => {
@@ -302,25 +317,28 @@ app.post("/start_job", quoteLimit, async (req, res, next) => {
     if (!agentId) { res.status(503).json({ error: "Agent not registered yet (MASUMI_AGENT_IDENTIFIER unset)." }); return; }
     const nonce = String(req.body?.identifier_from_purchaser ?? "").toLowerCase();
     if (!NONCE_RE.test(nonce)) { res.status(400).json({ error: "identifier_from_purchaser must be 14–26 lowercase hex characters (even length)" }); return; }
-    const input = parseVideoInput(req.body?.input_data);
-    if (typeof input === "string") { res.status(400).json({ error: input }); return; }
+    const parsed = parseVideoInput(req.body?.input_data);
+    if (typeof parsed === "string") { res.status(400).json({ error: parsed }); return; }
+    const q = quote(parsed);
+    const input = { ...parsed, duration: q.durationSeconds, resolution: q.resolution };
     if (store.all().filter(j => j.status === "awaiting_payment").length > 200) { res.status(503).json({ error: "Too many open jobs" }); return; }
     // The hash commits to input_data exactly as the buyer sent it (Sokosumi recomputes it).
     const hash = inputHash(nonce, req.body.input_data);
     const terms = await issueTerms({
       identifierFromPurchaser: nonce, inputHash: hash, agentIdentifier: agentId, sellerAddress: seller.address,
-      funds: [{ amount: priceTusdmUnits.toString(), unit: TUSDM_UNIT }], sign: seller.signTerms,
+      funds: [{ amount: q.tusdmUnits.toString(), unit: TUSDM_UNIT }], sign: seller.signTerms,
     });
     const job = store.create({
-      channel: "mip003", input, nonce, inputHash: hash, blockchainIdentifier: terms.blockchainIdentifier, agentIdentifier: agentId, sellerVKey: terms.sellerVKey,
+      channel: "mip003", input, price: { tusdm: q.tusdm, ada: q.ada, summary: quoteSummary(q) }, nonce, inputHash: hash, blockchainIdentifier: terms.blockchainIdentifier, agentIdentifier: agentId, sellerVKey: terms.sellerVKey,
       expected: big({
         sellerAddress: seller.address, referenceKey: terms.referenceKey, referenceSignature: terms.referenceSignature,
         sellerNonce: terms.sellerNonce, buyerNonce: nonce, agentIdentifier: agentId, inputHash: hash,
         payByTime: String(terms.payByTime), submitResultTime: String(terms.submitResultTime), unlockTime: String(terms.unlockTime),
-        externalDisputeUnlockTime: String(terms.externalDisputeUnlockTime), unit: TUSDM_UNIT, amount: priceTusdmUnits.toString(),
+        externalDisputeUnlockTime: String(terms.externalDisputeUnlockTime), unit: TUSDM_UNIT, amount: q.tusdmUnits.toString(),
       }),
     });
     res.json({
+      price: { tusdm: q.tusdm, breakdown: q.breakdown, max_iterations: MAX_ITERATIONS },
       id: job.id, job_id: job.id, status: "awaiting_payment",
       blockchainIdentifier: terms.blockchainIdentifier, payByTime: terms.payByTime, submitResultTime: terms.submitResultTime,
       unlockTime: terms.unlockTime, externalDisputeUnlockTime: terms.externalDisputeUnlockTime,
@@ -336,6 +354,23 @@ app.get("/status", (req, res) => {
   if (!job) { res.status(404).json({ error: "Unknown job_id" }); return; }
   res.json({ job_id: job.id, status: job.status, ...(job.status === "completed" && job.resultConfirmed && job.result ? { result: job.result } : {}), ...(job.error && job.status === "failed" ? { message: job.error } : {}) });
 });
+/** Free quote: what a request would cost (no signature, no job). */
+app.post("/quote", quoteLimit, (req, res) => {
+  const input = parseVideoInput(req.body?.input_data ?? req.body);
+  if (typeof input === "string") { res.status(400).json({ error: input }); return; }
+  const q = quote(input);
+  res.json({ tusdm: q.tusdm, ada: q.ada, duration_seconds: q.durationSeconds, resolution: q.resolution, complexity: q.complexity, breakdown: q.breakdown, max_iterations_per_hire: MAX_ITERATIONS });
+});
+
+/** Revision on a delivered hire. The job id (returned only to the buyer) is the access key. */
+app.post("/jobs/:id/revisions", quoteLimit, async (req, res) => {
+  const job = store.get(req.params.id);
+  if (!job) { res.status(404).json({ error: "Unknown job" }); return; }
+  const out = await revise(job.id, String(req.body?.instructions ?? ""));
+  if (out.ok) res.json({ revision: out.iteration.n, of: MAX_ITERATIONS, revisions_left: out.left, video_url: out.iteration.videoUrl, result: out.iteration.result, result_hash: out.iteration.resultHash });
+  else res.status(out.reason === "limit_reached" ? 402 : out.reason === "busy" ? 409 : out.reason === "not_delivered" ? 425 : 500).json({ error: out.message, reason: out.reason, ...(out.reason === "limit_reached" ? { rehire: "Start a new paid job (POST /start_job or an x402 route) to continue." } : {}) });
+});
+
 app.post("/provide_input", (_req, res) => { res.status(400).json({ error: "ReelForge never requests additional input" }); });
 app.get("/jobs/:id", (req, res) => { const j = store.get(req.params.id); if (j) res.json(view(j)); else res.status(404).json({ error: "Unknown job" }); });
 app.get("/jobs", (req, res) => {
@@ -359,6 +394,8 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
 
 for (const job of store.all()) {
   if (job.status === "completed" && job.resultTx && job.resultConfirmed === undefined && job.log.some(l => l.includes("SubmitResult confirmed"))) store.update(job.id, { resultConfirmed: true });
+  // Delivered before revisions existed: accept revision requests from now on.
+  if (job.channel === "sokosumi" && !job.sokosumiSeenAt && job.log.some(l => l.includes("reported to Sokosumi"))) store.update(job.id, { sokosumiSeenAt: new Date().toISOString() });
 }
 for (const offer of offers) { await offer.server.initialize(); await offer.http.initialize(); }
 setInterval(() => { void watch(); }, 10_000);
@@ -366,8 +403,8 @@ setInterval(() => { void collect(); }, 30_000);
 app.listen(port, () => {
   console.log(`ReelForge on http://localhost:${port}  public ${publicUrl()}`);
   console.log(`  seller  ${seller.address}\n  agent   ${agentId ?? "(not registered)"}\n  escrow  ${ESCROW_ADDRESS}`);
-  console.log(`  x402    ${offers.map(o => `${o.path} (${o.price.amount} ${o.price.asset === "lovelace" ? "lovelace" : "tUSDM units"})`).join(", ")}`);
+  console.log(`  x402    ${offers.map(o => `${o.path} (${o.price})`).join(", ")}  · max ${MAX_ITERATIONS} generations per hire`);
   void watch(); void collect();
-  if (agentId) startCoworkerRuntime({ agentIdentifier: agentId, sellerAddress: seller.address, sign: seller.signTerms, priceUnits: priceTusdmUnits });
+  if (agentId) startCoworkerRuntime({ agentIdentifier: agentId, sellerAddress: seller.address, sign: seller.signTerms });
 });
 export { app, chain, STATE };

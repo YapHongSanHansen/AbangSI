@@ -7,13 +7,15 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 
-export const DATA_DIR = fileURLToPath(new URL("../data/", import.meta.url));
+export const DATA_DIR = process.env.REELFORGE_DATA_DIR ?? fileURLToPath(new URL("../data/", import.meta.url));
 const FILE = `${DATA_DIR}jobs.json`;
 
 export type Channel = "mip003" | "x402" | "sokosumi";
 export type JobStatus = "awaiting_payment" | "running" | "completed" | "failed";
 
-export interface VideoInput { prompt: string; aspect_ratio?: "9:16" | "16:9" | "1:1"; duration?: number; style?: string }
+export interface VideoInput { prompt: string; aspect_ratio?: "9:16" | "16:9" | "1:1"; duration?: number; resolution?: "480p" | "720p" | "1080p"; style?: string }
+
+export interface Iteration { n: number; at: number; instructions?: string; prompt: string; generationId?: string; videoUrl?: string; result?: string; resultHash?: string; error?: string }
 
 export interface Job {
   id: string;
@@ -42,6 +44,12 @@ export interface Job {
   resultConfirmed?: boolean;
   collectTx?: string;
   sokosumiTaskId?: string;
+  /** Quoted price for this hire (human-readable) and its breakdown. */
+  price?: { tusdm: string; ada: string; summary: string };
+  /** Generations delivered under this hire (1 = first delivery; max MAX_ITERATIONS_PER_HIRE). */
+  iterations?: Iteration[];
+  /** Last Sokosumi event already handled (revision requests are newer user comments). */
+  sokosumiSeenAt?: string;
   error?: string;
   log: string[];
 }
