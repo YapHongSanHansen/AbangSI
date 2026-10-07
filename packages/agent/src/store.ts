@@ -13,7 +13,7 @@ const FILE = `${DATA_DIR}jobs.json`;
 export type Channel = "mip003" | "x402" | "sokosumi";
 export type JobStatus = "awaiting_payment" | "running" | "completed" | "failed";
 
-export interface VideoInput { prompt: string; aspect_ratio?: "9:16" | "16:9" | "1:1"; duration?: number; resolution?: "480p" | "720p" | "1080p"; style?: string }
+export interface VideoInput { prompt: string; aspect_ratio?: "9:16" | "16:9" | "1:1"; duration?: number; resolution?: "480p" | "720p" | "1080p"; style?: string; image_url?: string; reference_video_url?: string; reference_image_urls?: string[] }
 
 export interface Iteration { n: number; at: number; instructions?: string; prompt: string; generationId?: string; videoUrl?: string; result?: string; resultHash?: string; error?: string }
 

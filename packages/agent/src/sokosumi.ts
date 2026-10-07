@@ -18,6 +18,9 @@ import { big, store, type Job } from "./store.js";
 import { parseVideoInput } from "./video.js";
 import { quote, quoteSummary } from "./pricing.js";
 import { MAX_ITERATIONS, revise, revisionsLeft } from "./revisions.js";
+import { extractAttachments } from "./attachments.js";
+import { videoSeconds } from "./videoprobe.js";
+import { rates } from "./pricing.js";
 
 export const SOKOSUMI_API = optional("SOKOSUMI_API_URL", "https://api.preprod.sokosumi.com").replace(/\/+$/, "");
 
@@ -66,11 +69,23 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
     if (busy.has(taskId) || store.find(j => j.sokosumiTaskId === taskId)) return;
     busy.add(taskId);
     try {
-      const prompt = taskPrompt(task);
-      const parsed = parseVideoInput({ prompt, aspect_ratio: /16:9|landscape|youtube/i.test(prompt) ? "16:9" : /1:1|square/i.test(prompt) ? "1:1" : "9:16" });
+      const att = extractAttachments(taskPrompt(task));
+      const prompt = att.text.slice(0, 1000);
+      const swap = att.videos.length > 0 && att.images.length > 0;
+      let swapSeconds: number | undefined;
+      if (swap) {
+        try { swapSeconds = Math.ceil(await videoSeconds(att.videos[0])); }
+        catch (e) { await event(taskId, { status: "RUNNING", comment: "ReelForge picked up this Task." }); await event(taskId, { status: "FAILED", comment: `ReelForge could not use the attached video: ${(e as Error).message}. Nothing was charged.` }); return; }
+        if (swapSeconds > rates().maxSwapDuration) { await event(taskId, { status: "RUNNING", comment: "ReelForge picked up this Task." }); await event(taskId, { status: "FAILED", comment: `The attached video is ${swapSeconds}s; character swaps support up to ${rates().maxSwapDuration}s. Please trim it and create a new Task. Nothing was charged.` }); return; }
+      }
+      const parsed = parseVideoInput({
+        prompt, aspect_ratio: /16:9|landscape|youtube/i.test(prompt) ? "16:9" : /1:1|square/i.test(prompt) ? "1:1" : "9:16",
+        ...(swap ? { duration: swapSeconds } : att.images[0] ? { image_url: att.images[0] } : {}),
+      });
+      if (typeof parsed !== "string" && swap) Object.assign(parsed, { reference_video_url: att.videos[0], reference_image_urls: att.images.slice(0, 8) });
       await event(taskId, { status: "RUNNING", comment: "ReelForge picked up this Task." });
       if (typeof parsed === "string") { await event(taskId, { status: "FAILED", comment: `ReelForge needs a video prompt: ${parsed}` }); return; }
-      const q = quote(parsed);
+      const q = quote({ ...parsed, mode: swap ? "swap" : parsed.image_url ? "image" : "text" });
       const input = { ...parsed, duration: q.durationSeconds, resolution: q.resolution };
       const price = { tusdm: q.tusdm, ada: q.ada, summary: quoteSummary(q) };
       const nonce = newPurchaserNonce();
@@ -103,7 +118,7 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
         Amounts: terms.RequestedFunds, paymentSourceType: terms.paymentSourceType, supportedPaymentSourceIndex: terms.supportedPaymentSourceIndex,
         PaymentSource: { network: "Preprod", policyId: REGISTRY_POLICY_ID, smartContractAddress: ESCROW_ADDRESS },
       };
-      const r = await event(taskId, { comment: `Quote: ${q.tusdm} tUSDM for a ${q.durationSeconds}s ${q.resolution} reel (${q.complexity.tier} prompt). Breakdown: ${q.breakdown.join("; ")}. Paid into Masumi escrow (vested_pay) on Cardano preprod; includes up to ${MAX_ITERATIONS} generations (the reel + ${MAX_ITERATIONS - 1} revisions). The reel is generated as soon as the funds are locked.`, masumiPayment });
+      const r = await event(taskId, { comment: `Quote: ${q.tusdm} tUSDM for a ${q.durationSeconds}s ${q.resolution} ${swap ? `character swap (your ${att.videos.length > 1 ? "first " : ""}video + ${Math.min(8, att.images.length)} reference photo${att.images.length > 1 ? "s" : ""}, Higgsfield Genjutsu)` : parsed.image_url ? "image-to-video reel from your attached image" : "reel"} (${q.complexity.tier} prompt). Breakdown: ${q.breakdown.join("; ")}. Paid into Masumi escrow (vested_pay) on Cardano preprod; includes up to ${MAX_ITERATIONS} generations (the reel + ${MAX_ITERATIONS - 1} revisions). The reel is generated as soon as the funds are locked.`, masumiPayment });
       store.update(job.id, {}, `masumiPayment posted to Sokosumi task ${taskId} (event ${r?.data?.id ?? "?"})`);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);

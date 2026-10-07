@@ -27,6 +27,11 @@ export const INPUT_SCHEMA = {
       validations: [{ validation: "min", value: "1" }, { validation: "max", value: "1" }],
     },
     {
+      id: "image_url", type: "url", name: "Reference image (optional)",
+      data: { placeholder: "https://…/photo.jpg", description: "Animate this image (image-to-video) instead of generating from text only" },
+      validations: [{ validation: "optional", value: "true" }],
+    },
+    {
       id: "duration", type: "option", name: "Length (seconds)",
       data: { values: ["5", "10", "15"], description: "Longer reels cost more (priced per second)" },
       validations: [{ validation: "optional", value: "true" }],
@@ -54,11 +59,12 @@ export function parseVideoInput(raw: unknown): VideoInput | string {
   const duration = durRaw === undefined || durRaw === "" ? undefined : Number(durRaw);
   const resRaw = pick(d.resolution, ["480p", "720p", "1080p"]);
   const resolution = (["480p", "720p", "1080p"] as const).find(r => r === resRaw);
-  return { prompt, aspect_ratio, ...(Number.isFinite(duration) ? { duration } : {}), ...(resolution ? { resolution } : {}) };
+  const image_url = typeof d.image_url === "string" && /^https:\/\//i.test(d.image_url.trim()) ? d.image_url.trim() : undefined;
+  return { prompt, aspect_ratio, ...(Number.isFinite(duration) ? { duration } : {}), ...(resolution ? { resolution } : {}), ...(image_url ? { image_url } : {}) };
 }
 
 type Hf = {
-  createVideo(o: { prompt: string; aspectRatio?: string; durationSeconds?: number; model?: string; extraInput?: Record<string, unknown> }): Promise<{ generationId: string }>;
+  createVideo(o: { prompt: string; aspectRatio?: string; durationSeconds?: number; model?: string; imageUrl?: string; extraInput?: Record<string, unknown> }): Promise<{ generationId: string }>;
   waitForVideo(id: string, o: { timeoutMs: number; pollMs: number }): Promise<{ status: string; videoUrl?: string; error?: string }>;
 };
 let hf: Hf | null | undefined;
@@ -79,7 +85,13 @@ export async function generateVideo(input: VideoInput, deadlineMs: number): Prom
   if (client) {
     // Deliver exactly what was paid for: the quoted length and resolution.
     const spec = requestedSpecs({ prompt: input.prompt, duration: input.duration, resolution: input.resolution });
-    const created = await client.createVideo({ prompt: input.prompt, aspectRatio: input.aspect_ratio, durationSeconds: spec.durationSeconds, extraInput: { resolution: spec.resolution }, model: optional("HIGGSFIELD_MODEL") || undefined });
+    // Image attached → image-to-video (model picks its own framing from the image); else text-to-video at the paid resolution.
+    const swap = input.reference_video_url && input.reference_image_urls?.length;
+    const created = swap
+      ? await client.createVideo({ prompt: input.prompt, model: optional("HIGGSFIELD_SWAP_MODEL", "higgsfield/genjutsu/motion-transfer/v1.0"), extraInput: { video_url: input.reference_video_url, image_urls: input.reference_image_urls!.slice(0, 8), resolution: spec.resolution } })
+      : input.image_url
+      ? await client.createVideo({ prompt: input.prompt, imageUrl: input.image_url, durationSeconds: spec.durationSeconds, model: optional("HIGGSFIELD_I2V_MODEL") || undefined })
+      : await client.createVideo({ prompt: input.prompt, aspectRatio: input.aspect_ratio, durationSeconds: spec.durationSeconds, extraInput: { resolution: spec.resolution }, model: optional("HIGGSFIELD_MODEL") || undefined });
     generationId = created.generationId;
     const timeoutMs = Math.max(30_000, deadlineMs - Date.now());
     const done = await client.waitForVideo(generationId, { timeoutMs, pollMs: 5_000 });

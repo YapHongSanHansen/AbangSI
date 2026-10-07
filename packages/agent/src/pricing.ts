@@ -10,13 +10,17 @@
  * Defaults keep a simple 5 s 720p reel at exactly 1 tUSDM / 5 tADA. All rates are env-tunable.
  */
 import { optional } from "./config.js";
+import { extractAttachments } from "./attachments.js";
 
 export type Resolution = "480p" | "720p" | "1080p";
 export type Tier = "simple" | "standard" | "complex";
 
-export interface PricingInput { prompt: string; duration?: number; resolution?: Resolution }
+/** text = text-to-video, image = image-to-video, swap = video + reference photos (Genjutsu motion-transfer). */
+export type Mode = "text" | "image" | "swap";
+export interface PricingInput { prompt: string; duration?: number; resolution?: Resolution; mode?: Mode }
 
 export interface Quote {
+  mode: Mode;
   durationSeconds: number;
   resolution: Resolution;
   complexity: { tier: Tier; score: number; words: number; scenes: number; features: string[] };
@@ -39,10 +43,12 @@ export const rates = () => ({
   standard: num("PRICE_STANDARD_SURCHARGE_TUSDM", 0.25),
   complex: num("PRICE_COMPLEX_SURCHARGE_TUSDM", 0.6),
   perExtraScene: num("PRICE_PER_EXTRA_SCENE_TUSDM", 0.15),
+  swapPerSecond: num("PRICE_SWAP_PER_SECOND_TUSDM", 0.4),
   res: { "480p": num("PRICE_480P_FACTOR", 0.8), "720p": 1, "1080p": num("PRICE_1080P_FACTOR", 1.6) } as Record<Resolution, number>,
   adaPerTusdm: num("PRICE_ADA_PER_TUSDM", 5),
   minDuration: 4,
   maxDuration: num("MAX_DURATION_SECONDS", 15),
+  maxSwapDuration: num("MAX_SWAP_SECONDS", 30),
 });
 
 const FEATURES: Array<[string, RegExp]> = [
@@ -52,19 +58,21 @@ const FEATURES: Array<[string, RegExp]> = [
   ["effects", /\b(explosion|fire|smoke|rain|snow|particles?|neon|glitch|hologram|lightning|fireworks)\b/i],
   ["slow motion / time", /\b(slow[- ]?mo(tion)?|time[- ]?lapse|hyperlapse|freeze frame)\b/i],
 ];
-const SCENE_BREAKS = /\b(then cut to|then|cut to|next scene|after that|followed by|transition(s|ing)? to|scene \d)\b|;|\n/gi;
+const SCENE_BREAKS = /\b(then cut to|then|cut to|next scene|after that|followed by|transition(s|ing)? to|scene \d)\b|;/gi;
 
 /** Reads the requested length/resolution from explicit fields first, else from the prompt text. */
 export function requestedSpecs(input: PricingInput) {
   const r = rates();
   const fromText = input.prompt.match(/\b(\d{1,2})\s*(s|sec|secs|seconds?)\b/i);
   const raw = input.duration ?? (fromText ? Number(fromText[1]) : 5);
-  const durationSeconds = Math.min(r.maxDuration, Math.max(r.minDuration, Math.round(raw)));
+  const cap = input.mode === "swap" ? r.maxSwapDuration : r.maxDuration;
+  const durationSeconds = Math.min(cap, Math.max(r.minDuration, Math.round(raw)));
   const resolution: Resolution = input.resolution ?? (/\b(1080p|full ?hd|fhd)\b/i.test(input.prompt) ? "1080p" : /\b480p\b/i.test(input.prompt) ? "480p" : "720p");
   return { durationSeconds, resolution };
 }
 
-export function complexity(prompt: string) {
+export function complexity(raw: string) {
+  const prompt = extractAttachments(raw).text;
   const words = prompt.trim().split(/\s+/).filter(Boolean).length;
   const scenes = 1 + (prompt.match(SCENE_BREAKS)?.length ?? 0);
   const features = FEATURES.filter(([, re]) => re.test(prompt)).map(([name]) => name);
@@ -81,16 +89,18 @@ export function quote(input: PricingInput): Quote {
   const c = complexity(input.prompt);
   const surcharge = c.tier === "complex" ? r.complex : c.tier === "standard" ? r.standard : 0;
   const scenes = Math.max(0, c.scenes - 1) * r.perExtraScene;
-  const subtotal = r.base + r.perSecond * durationSeconds + surcharge + scenes;
+  const mode: Mode = input.mode ?? "text";
+  const perSecond = mode === "swap" ? r.swapPerSecond : r.perSecond;
+  const subtotal = r.base + perSecond * durationSeconds + surcharge + scenes;
   const tusdm = ceil5(subtotal * r.res[resolution]);
   const ada = Math.max(2, ceil5(tusdm * r.adaPerTusdm));
   return {
-    durationSeconds, resolution, complexity: c,
+    mode, durationSeconds, resolution, complexity: c,
     tusdmUnits: BigInt(Math.round(tusdm * 1e6)), lovelace: BigInt(Math.round(ada * 1e6)),
     tusdm: tusdm.toFixed(2), ada: ada.toFixed(2),
     breakdown: [
       `base ${r.base.toFixed(2)}`,
-      `${durationSeconds}s × ${r.perSecond.toFixed(2)} = ${(r.perSecond * durationSeconds).toFixed(2)}`,
+      `${mode === "swap" ? "character swap, " : mode === "image" ? "image-to-video, " : ""}${durationSeconds}s × ${perSecond.toFixed(2)} = ${(perSecond * durationSeconds).toFixed(2)}`,
       `${c.tier} prompt (score ${c.score}: ${c.words} words, ${c.scenes} scene${c.scenes > 1 ? "s" : ""}${c.features.length ? `, ${c.features.join(", ")}` : ""}) +${surcharge.toFixed(2)}`,
       ...(scenes ? [`extra scenes +${scenes.toFixed(2)}`] : []),
       `${resolution} × ${r.res[resolution]}`,
@@ -101,4 +111,4 @@ export function quote(input: PricingInput): Quote {
 
 /** One-line human summary used in Task comments and job views. */
 export const quoteSummary = (q: Quote) =>
-  `${q.tusdm} tUSDM for a ${q.durationSeconds}s ${q.resolution} reel, ${q.complexity.tier} prompt (${q.breakdown.slice(0, -1).join("; ")})`;
+  `${q.tusdm} tUSDM for a ${q.durationSeconds}s ${q.resolution} ${q.mode === "swap" ? "character swap" : q.mode === "image" ? "image-to-video reel" : "reel"}, ${q.complexity.tier} prompt (${q.breakdown.slice(0, -1).join("; ")})`;
