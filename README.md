@@ -84,6 +84,24 @@ The collector withdraws each escrow automatically after its `unlock_time` (~60 m
 quote, ~50 min after an x402 quote). Refunds: if no result is submitted before `submit_result_time`, the
 buyer reclaims via `WithdrawRefund`; disputes go to the escrow's admin multisig.
 
+## Live proof (Cardano preprod, 2026-10-07)
+
+Seller (ReelForge) `addr_test1qqvgrrs63qmum4kpsmxcqunwv70cycelmx5gtvycs27huh0zyfy7f4d0qgfq59rv2kk5f86372fmh5fapkq29xvw48vscpdmhs`
+· escrow `addr_test1wzs4e6wc95hkwezlccjw9mdvq0r0rsgx6zk34avptga3ftgn37w4g`
+· agent identifier `67ab0c92c4ac1610895a1c965ee50aba41a8f1513b15240723b3bd0b1055c4441512c1ae15024b9927c83afb597560b87b2535d275d905f5a4000000`
+(registry mint [`594357…`](https://preprod.cardanoscan.io/transaction/594357506a246d6f6d4c35452bddb0c98a447efb009d7a6742a4cfa704680ca7), registry status **Online**)
+· Sokosumi coworker **ReelForge** `01a1162d-eedb-70bf-b406-591bb55f785c` (granted in the TOKEN2049 Origins Hackathon 2026 workspace).
+
+| Job | Route | Escrow lock | Result hash on chain (SubmitResult) | Seller collection (Withdraw) | Net to seller |
+|---|---|---|---|---|---|
+| Sokosumi Task `01a1162e-c617-71ae-9783-396145d28f07` (personal) | coworker `masumiPayment`, 1 tUSDM | [`149588…`](https://preprod.cardanoscan.io/transaction/149588f40ecf57e6519204631cc32c3abc7f758f82688a9407ff577f49e34b2f) | [`e9be96…`](https://preprod.cardanoscan.io/transaction/e9be962c68146895fdcb0818cc162f23bd89ec49bd9ef527d037da70674dd01e) | [`9dedb3…`](https://preprod.cardanoscan.io/transaction/9dedb3fd1e48b83f00bd6f468925a580185ead8a1c801e8c1eab69eb32e49ca8) | **1 tUSDM** (`16a55b2a…0014df10745553444d`); Core receipt `settled: true, Withdrawn` |
+| x402 buyer (`pnpm buy`) | x402 `exact` + `masumi`, 5 tADA, hosted facilitator | [`9c9ea4…`](https://preprod.cardanoscan.io/transaction/9c9ea40f0dc23a7dfebd44e2683c31ae582dddd3ca27a603650c12c5af9e4e72) | [`76838f…`](https://preprod.cardanoscan.io/transaction/76838fec6a1216e2f21d1a3939d35c35e122c394ba6a7ef4688ed1d69dc03d79) | [`7b157e…`](https://preprod.cardanoscan.io/transaction/7b157e37a0e3bc95a67284c81a1321060ec69035383beffb35cccf5bbd27225c) | 4.356 tADA (5 − fee) |
+| Sokosumi Task `01a11659-73dd-7573-9c3a-7ca4733653de` (TOKEN2049) | coworker, 1 tUSDM | [`c65a30…`](https://preprod.cardanoscan.io/transaction/c65a305951794e08f79d320e46a3a79e32655fb026411d77a0c4204b6a9acf33) | [`0d0248…`](https://preprod.cardanoscan.io/transaction/0d0248960d7a563acd392d705cb8361101df4e0ee2dd098c4040f50f521926d0) | after unlock (13:32 UTC) | pending |
+| Sokosumi Task `01a11660-757a-72e4-a538-7259b4710de2` (TOKEN2049) | coworker, 1 tUSDM | [`cb1cd1…`](https://preprod.cardanoscan.io/transaction/cb1cd16a622c02d74c52085bb792f6a9309ae0a78002f3468c0e0c05d0578006) | [`a63a72…`](https://preprod.cardanoscan.io/transaction/a63a7244fd2df4c862965b2a94bbb8c5d96680b0e0899880e4a3c2a378f9a731) | after unlock | pending |
+
+Re-verify independently: `pnpm --filter @reelforge/agent verify-onchain` (every tx + escrow state via Blockfrost)
+and `pnpm --filter @reelforge/agent receipt <collectTx>` (seller net receipt from the tx's inputs/outputs).
+
 ## Security notes
 
 - Secrets live only in the git-ignored root `.env`; scripts never print mnemonics or keys.

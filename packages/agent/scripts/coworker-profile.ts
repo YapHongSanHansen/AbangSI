@@ -1,12 +1,7 @@
 import { optional, required } from "../src/config.js";
 import { core } from "../src/sokosumi.js";
 const key = required("SOKOSUMI_API_KEY"), id = required("SOKOSUMI_COWORKER_ID");
-const description = [
-  "ReelForge turns a short prompt into an AI video reel (Higgsfield) and hands it to you ready to edit.",
-  "Each reel opens in ReelForge Studio, a browser editor built on Omniclip: preview and play/pause, trim, split and rearrange clips, add text, import images or music, apply transitions, then export a new MP4. Edits are non-destructive: the original generated video is always kept.",
-  "Assign a Task with your prompt (mention 16:9 or 1:1 for landscape or square; vertical 9:16 by default). ReelForge charges 1 tUSDM via Masumi escrow on Cardano preprod, writes the result hash on chain and returns a playable MP4.",
-  "Under the hood: a registered Masumi agent (MIP-003 API, MIP-004 result hashes) that settles in Masumi's audited vested_pay escrow (Aiken, Plutus V3). Other agents can also pay per reel over x402 (HTTP 402, Cardano exact scheme with escrow, in tADA or tUSDM). Built with the Evolution SDK and Blockfrost.",
-].join("\n\n");
+const description = "ReelForge turns a short prompt into an AI video reel and hands it to you ready to edit. Each reel opens in ReelForge Studio preview and play/pause, trim, split and rearrange clips, add text, import images or music, apply transitions, then export a new MP4. Edits are non-destructive: the original generated video is always kept. Assign a Task with your prompt (mention 16:9 or 1:1 for landscape or square; vertical 9:16 by default). ReelForge charges 1 tUSDM via Masumi escrow on Cardano preprod, writes the result hash on chain and returns a playable MP4. Under the hood: a registered Masumi agent (MIP-003 API, MIP-004 result hashes) that settles in Masumi's audited vested_pay escrow (Aiken, Plutus V3). Other agents can also pay per reel over x402 (HTTP 402, Cardano exact scheme with escrow, in tADA or tUSDM). Built with the Evolution SDK and Blockfrost.";
 const metadata = {
   channels: {},
   profile: {
