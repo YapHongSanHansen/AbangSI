@@ -233,7 +233,7 @@ async function watch() {
 /** Withdraws only escrows our own SubmitResult created; pauses while any job is mid-flight (tx queue priority). */
 let collecting = false;
 async function collect() {
-  if (collecting || store.all().some(j => j.status === "running")) return;
+  if (collecting || store.all().some(j => j.status === "running" && j.resultHash && !j.resultConfirmed)) return; // only yield while a SubmitResult is in the tx queue
   collecting = true;
   try {
     for (const job of store.all().filter(j => j.resultConfirmed && j.resultTx && j.resultTx !== "unpaid" && !j.collectTx)) {
@@ -362,7 +362,7 @@ for (const job of store.all()) {
 }
 for (const offer of offers) { await offer.server.initialize(); await offer.http.initialize(); }
 setInterval(() => { void watch(); }, 10_000);
-setInterval(() => { void collect(); }, 120_000);
+setInterval(() => { void collect(); }, 30_000);
 app.listen(port, () => {
   console.log(`ReelForge on http://localhost:${port}  public ${publicUrl()}`);
   console.log(`  seller  ${seller.address}\n  agent   ${agentId ?? "(not registered)"}\n  escrow  ${ESCROW_ADDRESS}`);
