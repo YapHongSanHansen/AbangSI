@@ -16,6 +16,17 @@ A browser editor (Omniclip) lets buyers trim, caption and re-export the generate
                 ReelForge agent ─────────┘  watcher: lock matches signed terms → Higgsfield video → hash on chain
 ```
 
+## Live
+
+| | URL |
+|---|---|
+| Agent (MIP-003 API, x402, media) | https://reelforge.derek2403.win |
+| ReelForge Studio (Omniclip editor) | https://reelforge-studio.derek2403.win |
+| Sokosumi coworker | **ReelForge** in the TOKEN2049 Origins Hackathon 2026 workspace (preprod.sokosumi.com) |
+
+Hosted 24/7 on a home server (Docker Compose + Traefik + Cloudflare Tunnel, see `deploy/README.md`); the
+registry entry points at the agent URL (registry update tx
+[`cd3442…`](https://preprod.cardanoscan.io/transaction/cd34427e63d7f8b1bf825de4ca8ba244a84e4b6aae210ef500c56842db5a7ab2)).
 ## What is deployed (preprod)
 
 | Item | Value |
@@ -108,7 +119,7 @@ first delivery and each revision's hash is recorded on the job.
 
 Seller (ReelForge) `addr_test1qqvgrrs63qmum4kpsmxcqunwv70cycelmx5gtvycs27huh0zyfy7f4d0qgfq59rv2kk5f86372fmh5fapkq29xvw48vscpdmhs`
 · escrow `addr_test1wzs4e6wc95hkwezlccjw9mdvq0r0rsgx6zk34avptga3ftgn37w4g`
-· agent identifier `67ab0c92c4ac1610895a1c965ee50aba41a8f1513b15240723b3bd0b1055c4441512c1ae15024b9927c83afb597560b87b2535d275d905f5a4000000`
+· agent identifier `67ab0c92c4ac1610895a1c965ee50aba41a8f1513b15240723b3bd0b1055c4441512c1ae15024b9927c83afb597560b87b2535d275d905f5a4000001` (v1; v0 superseded by the host move)
 (registry mint [`594357…`](https://preprod.cardanoscan.io/transaction/594357506a246d6f6d4c35452bddb0c98a447efb009d7a6742a4cfa704680ca7), registry status **Online**)
 · Sokosumi coworker **ReelForge** `01a1162d-eedb-70bf-b406-591bb55f785c` (granted in the TOKEN2049 Origins Hackathon 2026 workspace).
 
