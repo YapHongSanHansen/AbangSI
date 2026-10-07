@@ -12,7 +12,7 @@
  *   5. collect: after unlock_time the collector withdraws (vested_pay Withdraw)
  */
 import { optional } from "./config.js";
-import { ESCROW_ADDRESS, REGISTRY_POLICY_ID, TUSDM_UNIT } from "./constants.js";
+import { ESCROW_ADDRESS, explorerTx, REGISTRY_POLICY_ID, TUSDM_UNIT } from "./constants.js";
 import { inputHash, issueTerms, newPurchaserNonce, type SignData } from "./masumi.js";
 import { big, store, type Job } from "./store.js";
 import { parseVideoInput } from "./video.js";
@@ -112,11 +112,35 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
     } finally { busy.delete(taskId); }
   }
 
+  const utc = (ms: string | number | undefined) => (ms ? `${new Date(Number(ms)).toISOString().slice(0, 16).replace("T", " ")} UTC` : "?");
+  const link = (h: string) => `[${h.slice(0, 10)}…](${explorerTx(h)})`;
+  const escrowLink = `[Masumi vested_pay escrow](https://preprod.cardanoscan.io/address/${ESCROW_ADDRESS})`;
+  const once = (job: Job, marker: string) => job.log.some(l => l.includes(marker));
+
+  /** Narrates each on-chain milestone into the Task chat exactly once. */
+  async function narrate(job: Job) {
+    if (!job.sokosumiTaskId || !job.expected) return;
+    const e = job.expected;
+    if (job.lockTx && job.status !== "awaiting_payment" && !once(job, "chat:locked")) {
+      await event(job.sokosumiTaskId, { comment: [
+        `**On-chain: escrow funded.** ${job.price?.tusdm ?? (Number(e.amount) / 1e6).toFixed(2)} tUSDM is locked in the ${escrowLink} on Cardano preprod (lock tx ${link(job.lockTx)}).`,
+        `ReelForge checked the escrow datum against the terms it signed (seller, nonces, input hash \`${job.inputHash.slice(0, 12)}…\`, deadlines) before starting. Generating your ${job.input.duration ?? 5}s ${job.input.resolution ?? "720p"} reel now.`,
+      ].join("\n\n") });
+      store.update(job.id, {}, "chat:locked posted");
+    }
+    if (job.collectTx && /^[0-9a-f]{64}$/.test(job.collectTx) && !once(job, "chat:collected")) {
+      await event(job.sokosumiTaskId, { comment: `**On-chain: settled.** After the unlock time (${utc(e.unlockTime)}) the seller collected the payment from the escrow (Withdraw tx ${link(job.collectTx)}); the buyer's ADA deposit was returned in the same transaction. This hire is complete on Cardano.` });
+      store.update(job.id, {}, "chat:collected posted");
+    }
+  }
+
   /** Reports finished/failed jobs back to their Sokosumi Task (once). */
   async function report(job: Job) {
     if (!job.sokosumiTaskId || job.log.some(l => l.includes("reported to Sokosumi"))) return;
     if (job.status === "completed" && job.result && job.resultTx && (job.resultConfirmed || job.resultTx === "unpaid")) {
-      const r = await event(job.sokosumiTaskId, { status: "COMPLETED", comment: `${job.result}\n\nNeed changes? Comment on this Task with what to change (or move it back to Ready). This hire includes ${revisionsLeft(job)} more revision${revisionsLeft(job) === 1 ? "" : "s"}.` });
+      const e = job.expected;
+      const proof = e ? `**On-chain: result committed.** Result hash \`${job.resultHash}\` was written to the escrow datum (SubmitResult tx ${link(job.resultTx)}); escrow state is now ResultSubmitted. Seller can collect from ${utc(e.unlockTime)}; the dispute window closes ${utc(e.externalDisputeUnlockTime)}.` : "";
+      const r = await event(job.sokosumiTaskId, { status: "COMPLETED", comment: `${job.result}\n\n${proof}\n\nNeed changes? Comment on this Task with what to change (or move it back to Ready). This hire includes ${revisionsLeft(job)} more revision${revisionsLeft(job) === 1 ? "" : "s"}.` });
       store.update(job.id, { sokosumiSeenAt: r?.data?.createdAt ?? new Date().toISOString() }, `reported to Sokosumi (COMPLETED); result hash ${job.resultHash} on chain in ${job.resultTx}`);
     } else if (job.status === "failed") {
       await event(job.sokosumiTaskId, { status: "FAILED", comment: `ReelForge failed: ${(job.error ?? "unknown").slice(0, 500)}` });
@@ -160,7 +184,7 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
       const out = await revise(job.id, instructions);
       const fresh = store.get(job.id)!;
       if (out.ok) {
-        const r = await statusEvent(taskId, { status: "COMPLETED", comment: `${out.iteration.result}\n\nRevision ${out.iteration.n}/${MAX_ITERATIONS} delivered — ${out.left} revision${out.left === 1 ? "" : "s"} left on this hire.${out.left === 0 ? " After this, a new Task (rehire) is needed for more changes." : ""}` });
+        const r = await statusEvent(taskId, { status: "COMPLETED", comment: `${out.iteration.result}\n\nRevision ${out.iteration.n}/${MAX_ITERATIONS} delivered (result hash \`${out.iteration.resultHash}\`, recorded under this hire) — ${out.left} revision${out.left === 1 ? "" : "s"} left on this hire.${out.left === 0 ? " After this, a new Task (rehire) is needed for more changes." : ""}` });
         store.update(fresh.id, { sokosumiSeenAt: r?.data?.createdAt ?? new Date().toISOString() });
       } else {
         const r = await statusEvent(taskId, { status: "COMPLETED", comment: out.message });
@@ -179,6 +203,7 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
       for (const t of list(body)) await pickUp(t);
       for (const job of store.all().filter(j => j.channel === "sokosumi")) {
         if (!paid && job.status === "running" && !job.result && !job.log.some(l => l.includes("generating (unpaid)"))) void runUnpaid(job);
+        await narrate(job).catch(e => console.warn(`[coworker] narrate ${job.sokosumiTaskId}: ${e instanceof Error ? e.message : e}`));
         await report(job).catch(e => console.warn(`[coworker] report ${job.sokosumiTaskId}: ${e instanceof Error ? e.message : e}`));
         if (tickCount % 2 === 0 && job.status === "completed" && job.resultConfirmed) void checkRevisions(job).catch(e => console.warn(`[coworker] revisions ${job.sokosumiTaskId}: ${e instanceof Error ? e.message : e}`));
       }

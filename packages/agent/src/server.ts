@@ -394,6 +394,8 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
 
 for (const job of store.all()) {
   if (job.status === "completed" && job.resultTx && job.resultConfirmed === undefined && job.log.some(l => l.includes("SubmitResult confirmed"))) store.update(job.id, { resultConfirmed: true });
+  // Jobs funded before chat narration existed: never post a stale "escrow funded / generating" message.
+  if (job.channel === "sokosumi" && job.lockTx && job.status !== "awaiting_payment" && !job.log.some(l => l.includes("chat:locked"))) store.update(job.id, {}, "chat:locked skipped (pre-narration job)");
   // Delivered before revisions existed: accept revision requests from now on.
   if (job.channel === "sokosumi" && !job.sokosumiSeenAt && job.log.some(l => l.includes("reported to Sokosumi"))) store.update(job.id, { sokosumiSeenAt: new Date().toISOString() });
 }
