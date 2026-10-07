@@ -20,7 +20,8 @@
     "verify-onchain": "tsx scripts/verify-onchain.ts",
     "receipt": "tsx scripts/receipt.ts",
     "txbreak": "tsx scripts/txbreak.ts",
-    "update-registry": "tsx scripts/update-registry.ts"
+    "update-registry": "tsx scripts/update-registry.ts",
+    "registry-refresh": "tsx scripts/registry-refresh.ts"
   },
   "keywords": [
     "cardano",

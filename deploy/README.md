@@ -64,5 +64,5 @@ into `/mnt/Storage1/app-data`, `docker compose up -d`.
 1. Stop the laptop agent (single executor).
 2. Copy its `packages/agent/data/` (jobs.json, media) into `/mnt/Storage1/app-data/reelforge/agent/`.
 3. Set `EXECUTOR_ENABLED=1` in `.env`, `docker compose up -d`.
-4. `pnpm --filter @reelforge/agent update-registry` (registry api_base_url -> new domain), put the new `MASUMI_AGENT_IDENTIFIER` in the server `.env`, restart.
+4. `pnpm --filter @reelforge/agent update-registry` (registry api_base_url -> new domain), put the new `MASUMI_AGENT_IDENTIFIER` in the server `.env`, restart, then `pnpm --filter @reelforge/agent registry-refresh` (the registry marks the entry Invalid if its first check saw the old identifier).
 5. Update the Sokosumi coworker url (`pnpm --filter @reelforge/agent coworker-profile`).
