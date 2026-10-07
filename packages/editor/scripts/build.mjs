@@ -37,8 +37,11 @@ fs.mkdirSync(x, {recursive: true})
 
 // 2. import map (importly reads the npm lockfile)
 {
-	const lock = fs.readFileSync(path.join(app, "package-lock.json"))
-	const r = run("importmap", process.execPath, [path.join(app, "node_modules/importly/x/cli.js"), "--host=node_modules"], {input: lock, stdio: ["pipe", "pipe", "inherit"]})
+	// stdin is the lockfile as a real file descriptor: importly reads stdin synchronously, which fails with
+	// EAGAIN on a non-blocking pipe (Linux/Docker). A file fd works on every platform.
+	const lockFd = fs.openSync(path.join(app, "package-lock.json"), "r")
+	const r = run("importmap", process.execPath, [path.join(app, "node_modules/importly/x/cli.js"), "--host=node_modules"], {stdio: [lockFd, "pipe", "inherit"]})
+	fs.closeSync(lockFd)
 	// ReelForge: page-relative import map so the editor can be served at "/" or under a sub-path like "/editor/"
 	// (es-module-shims resolves import-map addresses against the import map's own URL)
 	fs.writeFileSync(path.join(x, "importmap.json"), String(r.stdout).replaceAll('"/node_modules/', '"./node_modules/'))

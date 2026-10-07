@@ -27,6 +27,7 @@ const REDEEMER = {
   withdraw: Data.constr(0n, []),
   submitResult: Data.constr(5n, []),
   mint: Data.constr(0n, []),
+  update: Data.constr(1n, []),
   burn: Data.constr(2n, []),
 };
 const SLOT = SlotConfig.SLOT_CONFIG_NETWORK.Preprod;
@@ -200,6 +201,33 @@ export function createChain(cfg: { blockfrost: Blockfrost; mnemonic: string; sel
     return finish(built);
   });
 
+  /**
+   * Registry UpdateAction (registry-v2 mint.ak): burn the current entry and mint its
+   * successor in one tx — same nonce + root hash, version + 1 — with new label-721
+   * metadata (e.g. a new api_base_url). Returns the new agent identifier.
+   */
+  const updateRegistry = (agentIdentifier: string, metadata: Record<string, unknown>) => serial(async () => {
+    const oldName = agentIdentifier.slice(56);
+    if (oldName.length !== 64) throw new Error("agent identifier must be policy (56 hex) + 32-byte asset name");
+    const version = parseInt(oldName.slice(58), 16);
+    const newName = oldName.slice(0, 58) + (version + 1).toString(16).padStart(6, "0");
+    const holder = (await client.getWalletUtxos()).find(u => Assets.getByUnit(u.assets, agentIdentifier) === 1n);
+    if (!holder) throw new Error(`${agentIdentifier} is not held by the seller`);
+    let mint = Assets.addByHex(Assets.zero, REGISTRY_POLICY_ID, oldName, -1n);
+    mint = Assets.addByHex(mint, REGISTRY_POLICY_ID, newName, 1n);
+    const nft = Assets.addByHex(Assets.zero, REGISTRY_POLICY_ID, newName, 1n);
+    const built = await client.newTx()
+      .collectFrom({ inputs: [holder] })
+      .attachScript({ script: registryScript() })
+      .mintAssets({ assets: mint, redeemer: REDEEMER.update })
+      .payToAddress({ address: seller, assets: Assets.withLovelace(nft, 2_000_000n), autoMinUtxo: true })
+      .attachMetadata({ label: 721n, metadata: toMetadatum({ [REGISTRY_POLICY_ID]: { [newName]: metadata }, version: "1" }) })
+      .addSigner({ keyHash: KeyHash.fromHex(sellerVkh) })
+      .build({ changeAddress: seller, availableUtxos: await spendable() });
+    const txHash = await finish(built, h => log(`registry update submitted ${h}`));
+    return { txHash, agentIdentifier: REGISTRY_POLICY_ID + newName };
+  });
+
   /** SubmitResult: continue the lock at the escrow with result_hash set. */
   const submitResult = (lock: EscrowLock, resultHashHex: string, onSubmitted?: (h: string) => void) => serial(async () => {
     const utxo = lock.utxo, d = lock.datum;
@@ -282,6 +310,6 @@ export function createChain(cfg: { blockfrost: Blockfrost; mnemonic: string; sel
     return u ? toLock(u) : null;
   }
 
-  return { tipMs, locksOfTx, locksWithUnit, allLocks, lockByRef, resolveByIdentity, collectible, register, deregister, submitResult, withdraw, sellerVkh };
+  return { tipMs, locksOfTx, locksWithUnit, allLocks, lockByRef, resolveByIdentity, collectible, register, updateRegistry, deregister, submitResult, withdraw, sellerVkh };
 }
 export type Chain = ReturnType<typeof createChain>;

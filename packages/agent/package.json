@@ -19,7 +19,8 @@
     "coworker-profile": "tsx scripts/coworker-profile.ts",
     "verify-onchain": "tsx scripts/verify-onchain.ts",
     "receipt": "tsx scripts/receipt.ts",
-    "txbreak": "tsx scripts/txbreak.ts"
+    "txbreak": "tsx scripts/txbreak.ts",
+    "update-registry": "tsx scripts/update-registry.ts"
   },
   "keywords": [
     "cardano",
