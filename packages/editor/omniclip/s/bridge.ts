@@ -359,7 +359,7 @@ export async function addText(text: string, opts: TextOptions = {}): Promise<Tex
 		start: 0,
 		end: duration,
 		track: 0,
-		fontSize: opts.fontSize ?? Math.round(ch / 12),
+		fontSize: opts.fontSize ?? Math.round(Math.min(ch / 12, cw / 10)),
 		text,
 		fontStyle: "normal",
 		fontFamily,
@@ -435,6 +435,11 @@ export async function startExport() {
 	if (ctx.state.effects.length === 0) throw new BridgeError("empty_timeline", "Nothing to export, the timeline is empty.")
 	if (ctx.state.is_exporting) throw new BridgeError("export_busy", "An export is already running.")
 	if (!window.VideoEncoder) throw new BridgeError("webcodecs_unsupported", "Export needs WebCodecs (latest Chrome or Edge).")
+	try {
+		await ctx.helpers.ffmpeg.isLoading
+	} catch {
+		throw new BridgeError("ffmpeg_unavailable", "The video encoder (ffmpeg.wasm) could not be loaded. Check the connection and reload the editor.")
+	}
 	ctx.controllers.video_export.export_start(ctx.state, ctx.state.settings.bitrate)
 }
 
@@ -447,6 +452,11 @@ function watchExports() {
 		const ctx = getContext()
 		if (!ctx) return
 		const state = ctx.state
+		if (state.export_status === "error" && state.is_exporting) {
+			if (!delivered) post({type: "reelforge:error", code: "export_failed", message: `Export failed: ${state.log || "muxing error"}`, request: "export"})
+			delivered = true
+			return
+		}
 		if (state.export_status !== "complete") {
 			delivered = false
 			return

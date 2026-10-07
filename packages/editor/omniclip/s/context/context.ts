@@ -2,7 +2,7 @@ import {AppCore, Pojo, Nexus, ZipAction, watch, signals} from "@benev/slate"
 import {slate, Context, PanelSpec} from "@benev/construct/x/mini.js"
 
 import {store} from "./controllers/store/store.js"
-import {removeLoadingPageIndicator} from "../main.js"
+import {removeLoadingPageIndicator} from "../utils/loading-indicator.js"
 import {Media} from "./controllers/media/controller.js"
 import {Timeline} from "./controllers/timeline/controller.js"
 import {Shortcuts} from "./controllers/shortcuts/controller.js"

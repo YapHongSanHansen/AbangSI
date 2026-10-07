@@ -43,6 +43,7 @@
   "dependencies": {
     "@benev/construct": "^0.0.0-y.0",
     "@benev/slate": "^0.1.0-x.14",
+    "@ffmpeg/core": "^0.12.5",
     "@ffmpeg/ffmpeg": "^0.12.9",
     "@ffmpeg/util": "^0.12.1",
     "@floating-ui/dom": "^1.6.12",

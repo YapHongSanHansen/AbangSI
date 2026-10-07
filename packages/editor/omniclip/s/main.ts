@@ -99,11 +99,7 @@ export function setupContext(projectId: string) {
 register_to_dom({OmniManager})
 let registered = false
 
-export function removeLoadingPageIndicator() {
-	const loadingPageIndicatorElement = document.querySelector(".loading-page-indicator")
-	if(loadingPageIndicatorElement)
-		document.body.removeChild(loadingPageIndicatorElement!)
-}
+export {removeLoadingPageIndicator} from "./utils/loading-indicator.js"
 
 const VideoEditor =  (omnislate: Nexus<OmniContext>) => omnislate.light_view((use) => () => {
 	use.watch(() => use.context.state)

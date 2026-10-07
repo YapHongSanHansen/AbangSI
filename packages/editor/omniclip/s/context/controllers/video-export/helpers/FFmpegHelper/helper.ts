@@ -11,7 +11,10 @@ import {isEffectMuted} from "../../../compositor/utils/is_effect_muted.js"
 
 export class FFmpegHelper {
 	ffmpeg = new FFmpeg()
-	ffprobe = new FFprobeWorker()
+	// ReelForge: lazy. ffprobe-wasm needs SharedArrayBuffer (cross-origin isolation), which we no longer force
+	// with coi-serviceworker; it is only used by get_frames_count (not on the import/edit/export path).
+	#ffprobe: FFprobeWorker | null = null
+	get ffprobe() { return this.#ffprobe ??= new FFprobeWorker() }
 	is_loading = signals.op<any>()
 	isLoading: Promise<any>
 
@@ -22,11 +25,25 @@ export class FFmpegHelper {
 	}
 
 	async #load_ffmpeg() {
-		const baseURL = 'https://unpkg.com/@ffmpeg/core@0.12.5/dist/esm'
-		await this.ffmpeg.load({
-			coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
-			wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
-		})
+		// ReelForge: self-host the (single-threaded) ffmpeg core from our own node_modules; unpkg only as fallback
+		const bases = [
+			new URL("node_modules/@ffmpeg/core/dist/esm", document.baseURI).href,
+			'https://unpkg.com/@ffmpeg/core@0.12.5/dist/esm',
+		]
+		let lastError: unknown
+		for (const baseURL of bases) {
+			try {
+				await this.ffmpeg.load({
+					coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, 'text/javascript'),
+					wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, 'application/wasm'),
+				})
+				return
+			} catch (e) {
+				lastError = e
+				console.warn(`[reelforge] ffmpeg core failed to load from ${baseURL}`, e)
+			}
+		}
+		throw lastError
 	}
 
 	async write_composed_data(binary: Uint8Array, container_name: string) {

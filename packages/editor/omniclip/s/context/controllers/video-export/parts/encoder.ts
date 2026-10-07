@@ -25,11 +25,19 @@ export class Encoder {
 		this.encode_worker.onmessage = async (msg) => {
 			if(msg.data.action === "binary") {
 				const output_name = "output.mp4"
-				await this.#ffmpeg.write_composed_data(msg.data.binary, "composed.h264")
-				await this.#ffmpeg.merge_audio_with_video_and_mux(effects, "composed.h264", output_name, this.media, timebase)
-				const muxed_file = await this.#ffmpeg.get_muxed_file(output_name)
-				this.file = muxed_file
-				this.actions.set_export_status("complete")
+				try {
+					// ReelForge: ffmpeg.wasm (~31 MB) may still be downloading on slow links, wait for it
+					await this.#ffmpeg.isLoading
+					await this.#ffmpeg.write_composed_data(msg.data.binary, "composed.h264")
+					await this.#ffmpeg.merge_audio_with_video_and_mux(effects, "composed.h264", output_name, this.media, timebase)
+					const muxed_file = await this.#ffmpeg.get_muxed_file(output_name)
+					this.file = muxed_file
+					this.actions.set_export_status("complete")
+				} catch (e) {
+					console.error("[reelforge] export muxing failed", e)
+					this.actions.set_log(`export failed: ${(e as Error)?.message ?? e}`)
+					this.actions.set_export_status("error")
+				}
 			}
 		}
 		return

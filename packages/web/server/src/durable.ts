@@ -25,7 +25,8 @@ function checkUrl(raw: string): URL {
 	try { u = new URL(raw) } catch { throw new ApiError(400, "bad_url", "videoUrl is not a valid URL.") }
 	if (u.protocol !== "https:" && u.protocol !== "http:") throw new ApiError(400, "bad_url", "videoUrl must be http(s).")
 	if (u.username || u.password) throw new ApiError(400, "bad_url", "Credentials in URLs are not allowed.")
-	if (!importHostAllowed(u.hostname)) {
+	const ownMock = u.origin === new URL(config.publicUrl).origin && u.pathname.startsWith("/api/mock/")
+	if (!ownMock && !importHostAllowed(u.hostname)) {
 		throw new ApiError(403, "host_not_allowed", `Downloading from ${u.hostname} is not allowed. Add it to IMPORT_ALLOWED_HOSTS on the server.`)
 	}
 	return u
