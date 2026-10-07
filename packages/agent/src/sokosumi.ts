@@ -20,6 +20,7 @@ import { quote, quoteSummary } from "./pricing.js";
 import { MAX_ITERATIONS, revise, revisionsLeft } from "./revisions.js";
 import { extractAttachments } from "./attachments.js";
 import { videoSeconds } from "./videoprobe.js";
+import { promptFromFiles } from "./files.js";
 import { rates } from "./pricing.js";
 
 export const SOKOSUMI_API = optional("SOKOSUMI_API_URL", "https://api.preprod.sokosumi.com").replace(/\/+$/, "");
@@ -70,7 +71,16 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
     busy.add(taskId);
     try {
       const att = extractAttachments(taskPrompt(task));
-      const prompt = att.text.slice(0, 1000);
+      for (const f of [...(Array.isArray(task.files) ? task.files : []), ...(Array.isArray(task.links) ? task.links : [])]) {
+        const url = typeof f === "string" ? f : f?.url ?? f?.downloadUrl ?? f?.href;
+        if (typeof url === "string" && /^https:\/\//i.test(url)) { const more = extractAttachments(url); att.images.push(...more.images); att.videos.push(...more.videos); att.documents.push(...more.documents); }
+      }
+      let prompt = att.text.slice(0, 1000);
+      let derived: Awaited<ReturnType<typeof promptFromFiles>> | undefined;
+      if (att.documents.length) {
+        try { derived = await promptFromFiles(att.text, att.documents, att.images); prompt = derived.prompt; }
+        catch (e) { await event(taskId, { status: "RUNNING", comment: "ReelForge picked up this Task." }).catch(() => {}); await event(taskId, { status: "FAILED", comment: `ReelForge could not read the attached files: ${(e as Error).message}. Nothing was charged.` }); return; }
+      }
       const swap = att.videos.length > 0 && att.images.length > 0;
       let swapSeconds: number | undefined;
       if (swap) {
@@ -83,9 +93,15 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
         ...(swap ? { duration: swapSeconds } : att.images[0] ? { image_url: att.images[0] } : {}),
       });
       if (typeof parsed !== "string" && swap) Object.assign(parsed, { reference_video_url: att.videos[0], reference_image_urls: att.images.slice(0, 8) });
-      await event(taskId, { status: "RUNNING", comment: "ReelForge picked up this Task." });
+      if (typeof parsed !== "string" && derived) Object.assign(parsed, { source_files: derived.sources, prompt_via: derived.via });
+      try { await event(taskId, { status: "RUNNING", comment: "ReelForge picked up this Task." }); }
+      catch (e) {
+        // "same status": another executor already claimed this Task — back off, never double-charge.
+        if ((e as { status?: number }).status === 422) { console.warn(`[coworker] task ${taskId} already claimed elsewhere; skipping`); return; }
+        throw e;
+      }
       if (typeof parsed === "string") { await event(taskId, { status: "FAILED", comment: `ReelForge needs a video prompt: ${parsed}` }); return; }
-      const q = quote({ ...parsed, mode: swap ? "swap" : parsed.image_url ? "image" : "text" });
+      const q = quote({ ...parsed, prompt: derived ? (att.text || "short reel") : parsed.prompt, mode: swap ? "swap" : parsed.image_url ? "image" : "text", documents: att.documents.length });
       const input = { ...parsed, duration: q.durationSeconds, resolution: q.resolution };
       const price = { tusdm: q.tusdm, ada: q.ada, summary: quoteSummary(q) };
       const nonce = newPurchaserNonce();
@@ -118,7 +134,7 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
         Amounts: terms.RequestedFunds, paymentSourceType: terms.paymentSourceType, supportedPaymentSourceIndex: terms.supportedPaymentSourceIndex,
         PaymentSource: { network: "Preprod", policyId: REGISTRY_POLICY_ID, smartContractAddress: ESCROW_ADDRESS },
       };
-      const r = await event(taskId, { comment: `Quote: ${q.tusdm} tUSDM for a ${q.durationSeconds}s ${q.resolution} ${swap ? `character swap (your ${att.videos.length > 1 ? "first " : ""}video + ${Math.min(8, att.images.length)} reference photo${att.images.length > 1 ? "s" : ""}, Higgsfield Genjutsu)` : parsed.image_url ? "image-to-video reel from your attached image" : "reel"} (${q.complexity.tier} prompt). Breakdown: ${q.breakdown.join("; ")}. Paid into Masumi escrow (vested_pay) on Cardano preprod; includes up to ${MAX_ITERATIONS} generations (the reel + ${MAX_ITERATIONS - 1} revisions). The reel is generated as soon as the funds are locked.`, masumiPayment });
+      const r = await event(taskId, { comment: `Quote: ${q.tusdm} tUSDM for a ${q.durationSeconds}s ${q.resolution} ${swap ? `character swap (your ${att.videos.length > 1 ? "first " : ""}video + ${Math.min(8, att.images.length)} reference photo${att.images.length > 1 ? "s" : ""}, Higgsfield Genjutsu)` : parsed.image_url ? "image-to-video reel from your attached image" : "reel"} (${q.complexity.tier} prompt). Breakdown: ${q.breakdown.join("; ")}. ${derived ? ` Read ${derived.sources.map(s => `${s.name} (${s.chars.toLocaleString()} chars)`).join(", ")} → video prompt${derived.via === "openai" ? "" : " (excerpt)"}: "${derived.prompt.slice(0, 400).replace(/"/g, "'")}${derived.prompt.length > 400 ? "…" : ""}".` : ""} Paid into Masumi escrow (vested_pay) on Cardano preprod; includes up to ${MAX_ITERATIONS} generations (the reel + ${MAX_ITERATIONS - 1} revisions). The reel is generated as soon as the funds are locked.`, masumiPayment });
       store.update(job.id, {}, `masumiPayment posted to Sokosumi task ${taskId} (event ${r?.data?.id ?? "?"})`);
     } catch (error) {
       const msg = error instanceof Error ? error.message : String(error);
@@ -158,7 +174,7 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
       const r = await event(job.sokosumiTaskId, { status: "COMPLETED", comment: `${job.result}\n\n${proof}\n\nNeed changes? Comment on this Task with what to change (or move it back to Ready). This hire includes ${revisionsLeft(job)} more revision${revisionsLeft(job) === 1 ? "" : "s"}.` });
       store.update(job.id, { sokosumiSeenAt: r?.data?.createdAt ?? new Date().toISOString() }, `reported to Sokosumi (COMPLETED); result hash ${job.resultHash} on chain in ${job.resultTx}`);
     } else if (job.status === "failed") {
-      await event(job.sokosumiTaskId, { status: "FAILED", comment: `ReelForge failed: ${(job.error ?? "unknown").slice(0, 500)}` });
+      await statusEvent(job.sokosumiTaskId, { status: "FAILED", comment: `ReelForge could not deliver this Task: ${(job.error ?? "unknown").slice(0, 500)}` });
       store.update(job.id, {}, "reported to Sokosumi (FAILED)");
     }
   }

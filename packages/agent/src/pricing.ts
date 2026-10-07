@@ -17,7 +17,7 @@ export type Tier = "simple" | "standard" | "complex";
 
 /** text = text-to-video, image = image-to-video, swap = video + reference photos (Genjutsu motion-transfer). */
 export type Mode = "text" | "image" | "swap";
-export interface PricingInput { prompt: string; duration?: number; resolution?: Resolution; mode?: Mode }
+export interface PricingInput { prompt: string; duration?: number; resolution?: Resolution; mode?: Mode; documents?: number }
 
 export interface Quote {
   mode: Mode;
@@ -44,6 +44,7 @@ export const rates = () => ({
   complex: num("PRICE_COMPLEX_SURCHARGE_TUSDM", 0.6),
   perExtraScene: num("PRICE_PER_EXTRA_SCENE_TUSDM", 0.15),
   swapPerSecond: num("PRICE_SWAP_PER_SECOND_TUSDM", 0.4),
+  perDocument: num("PRICE_PER_DOCUMENT_TUSDM", 0.2),
   res: { "480p": num("PRICE_480P_FACTOR", 0.8), "720p": 1, "1080p": num("PRICE_1080P_FACTOR", 1.6) } as Record<Resolution, number>,
   adaPerTusdm: num("PRICE_ADA_PER_TUSDM", 5),
   minDuration: 4,
@@ -91,7 +92,8 @@ export function quote(input: PricingInput): Quote {
   const scenes = Math.max(0, c.scenes - 1) * r.perExtraScene;
   const mode: Mode = input.mode ?? "text";
   const perSecond = mode === "swap" ? r.swapPerSecond : r.perSecond;
-  const subtotal = r.base + perSecond * durationSeconds + surcharge + scenes;
+  const docs = Math.min(5, input.documents ?? 0) * r.perDocument;
+  const subtotal = r.base + perSecond * durationSeconds + surcharge + scenes + docs;
   const tusdm = ceil5(subtotal * r.res[resolution]);
   const ada = Math.max(2, ceil5(tusdm * r.adaPerTusdm));
   return {
@@ -103,6 +105,7 @@ export function quote(input: PricingInput): Quote {
       `${mode === "swap" ? "character swap, " : mode === "image" ? "image-to-video, " : ""}${durationSeconds}s × ${perSecond.toFixed(2)} = ${(perSecond * durationSeconds).toFixed(2)}`,
       `${c.tier} prompt (score ${c.score}: ${c.words} words, ${c.scenes} scene${c.scenes > 1 ? "s" : ""}${c.features.length ? `, ${c.features.join(", ")}` : ""}) +${surcharge.toFixed(2)}`,
       ...(scenes ? [`extra scenes +${scenes.toFixed(2)}`] : []),
+      ...(docs ? [`${input.documents} file${input.documents === 1 ? "" : "s"} read +${docs.toFixed(2)}`] : []),
       `${resolution} × ${r.res[resolution]}`,
       `= ${tusdm.toFixed(2)} tUSDM (x402: ${ada.toFixed(2)} tADA)`,
     ],

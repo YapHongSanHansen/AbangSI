@@ -34,6 +34,25 @@ import { generateVideo, INPUT_SCHEMA, MEDIA_DIR, parseVideoInput, resultText } f
 import { startCoworkerRuntime } from "./sokosumi.js";
 import { quote, quoteSummary } from "./pricing.js";
 import { iterations, MAX_ITERATIONS, revise, revisionsLeft } from "./revisions.js";
+import { fileUrls, resolveInput } from "./input.js";
+
+import { existsSync as _exists, readFileSync as _read, writeFileSync as _write, rmSync as _rm, mkdirSync as _mkdir } from "node:fs";
+import { DATA_DIR } from "./store.js";
+/** One executor per coworker/seller: refuse to start while another live ReelForge process holds the lock. */
+{
+  const lock = `${DATA_DIR}server.lock`;
+  _mkdir(DATA_DIR, { recursive: true });
+  if (_exists(lock)) {
+    const pid = Number(_read(lock, "utf8"));
+    let alive = false;
+    try { if (pid && pid !== process.pid) { process.kill(pid, 0); alive = true; } } catch { alive = false; }
+    if (alive) { console.error(`Another ReelForge server (pid ${pid}) is running — refusing to start a second executor.`); process.exit(1); }
+  }
+  _write(lock, String(process.pid));
+  const release = () => { try { if (Number(_read(lock, "utf8")) === process.pid) _rm(lock); } catch {} };
+  process.on("exit", release);
+  for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK"] as const) process.on(sig, () => { release(); process.exit(0); });
+}
 
 const seller = sellerWallet();
 const agentId = agentIdentifier();
@@ -59,8 +78,8 @@ const X402_DEADLINES = { submitResultAfterPayByMs: 30 * 60_000, unlockAfterPayBy
 /** Per-request x402 price from the request body (length, resolution, prompt complexity). */
 const dynamicPrice = (asset: "lovelace" | "tusdm") => async (ctx: { adapter: { getBody?: () => unknown } }) => {
   const body = ctx.adapter.getBody?.() as Record<string, unknown> | undefined;
-  const input = parseVideoInput(body?.input_data ?? body);
-  const q = quote(typeof input === "string" ? { prompt: "invalid" } : input);
+  const resolved = await resolveInput(body?.input_data ?? body).catch(() => "unresolvable");
+  const q = typeof resolved === "string" ? quote({ prompt: "invalid" }) : resolved.quote;
   return asset === "lovelace" ? { amount: q.lovelace.toString(), asset: "lovelace" } : { amount: q.tusdmUnits.toString(), asset: TUSDM_X402_ASSET };
 };
 
@@ -72,8 +91,11 @@ function x402Offer(path: string, price: ReturnType<typeof dynamicPrice>, label: 
       // Bind the escrow's input_hash to the exact job request (validated before the gate).
       commitment: ({ transportContext }) => {
         const body = (transportContext as HTTPTransportContext).request.adapter.getBody?.() as Record<string, unknown>;
-        const input = parseVideoInput(body?.input_data ?? body);
-        return [{ name: "body", canonicalization: "jcs", mediaType: "application/json", content: { input_data: input } }];
+        const raw = (body?.input_data ?? body) as Record<string, unknown>;
+        const input = parseVideoInput(raw);
+        const files = fileUrls(raw);
+        const content = typeof input === "string" ? { prompt: typeof raw?.prompt === "string" ? raw.prompt : "", files } : { ...input, ...(files.length ? { files } : {}) };
+        return [{ name: "body", canonicalization: "jcs", mediaType: "application/json", content: { input_data: content } }];
       },
     },
   }));
@@ -98,17 +120,16 @@ const offers = [
 ];
 
 /** Records a verified x402 payment as a job (runs before settlement, and again on retries: idempotent). */
-function x402Job(req: Request): Job {
+async function x402Job(req: Request): Promise<Job> {
   const payment = decodePaymentSignatureHeader((req.get("PAYMENT-SIGNATURE") ?? req.get("X-PAYMENT"))!);
   const { txHash } = decodeCardanoTransaction(String(payment.payload.transaction));
   const existing = store.find(j => j.lockTx === txHash);
   if (existing) return existing;
   const extra = payment.accepted.extra as unknown as CardanoExtraMasumi;
   const { terms } = extra;
-  const parsed = parseVideoInput((extra.inputCommitment.parts[0].content as { input_data: unknown }).input_data);
-  if (typeof parsed === "string") throw new Error(parsed);
-  const q = quote(parsed);
-  const input = { ...parsed, duration: q.durationSeconds, resolution: q.resolution };
+  const resolved = await resolveInput((extra.inputCommitment.parts[0].content as { input_data: unknown }).input_data);
+  if (typeof resolved === "string") throw new Error(resolved);
+  const { input, quote: q } = resolved;
   return store.create({
     channel: "x402", input, nonce: terms.buyerNonce, inputHash: terms.inputHash, lockTx: txHash,
     price: { tusdm: q.tusdm, ada: (Number(payment.accepted.amount) / 1e6).toFixed(2), summary: payment.accepted.asset === "lovelace" ? `${(Number(payment.accepted.amount) / 1e6).toFixed(2)} tADA — ${quoteSummary(q)}` : quoteSummary(q) },
@@ -317,10 +338,9 @@ app.post("/start_job", quoteLimit, async (req, res, next) => {
     if (!agentId) { res.status(503).json({ error: "Agent not registered yet (MASUMI_AGENT_IDENTIFIER unset)." }); return; }
     const nonce = String(req.body?.identifier_from_purchaser ?? "").toLowerCase();
     if (!NONCE_RE.test(nonce)) { res.status(400).json({ error: "identifier_from_purchaser must be 14–26 lowercase hex characters (even length)" }); return; }
-    const parsed = parseVideoInput(req.body?.input_data);
-    if (typeof parsed === "string") { res.status(400).json({ error: parsed }); return; }
-    const q = quote(parsed);
-    const input = { ...parsed, duration: q.durationSeconds, resolution: q.resolution };
+    const resolved = await resolveInput(req.body?.input_data).catch((e: Error) => `could not read the attached files: ${e.message}`);
+    if (typeof resolved === "string") { res.status(400).json({ error: resolved }); return; }
+    const { input, quote: q } = resolved;
     if (store.all().filter(j => j.status === "awaiting_payment").length > 200) { res.status(503).json({ error: "Too many open jobs" }); return; }
     // The hash commits to input_data exactly as the buyer sent it (Sokosumi recomputes it).
     const hash = inputHash(nonce, req.body.input_data);
@@ -355,11 +375,11 @@ app.get("/status", (req, res) => {
   res.json({ job_id: job.id, status: job.status, ...(job.status === "completed" && job.resultConfirmed && job.result ? { result: job.result } : {}), ...(job.error && job.status === "failed" ? { message: job.error } : {}) });
 });
 /** Free quote: what a request would cost (no signature, no job). */
-app.post("/quote", quoteLimit, (req, res) => {
-  const input = parseVideoInput(req.body?.input_data ?? req.body);
-  if (typeof input === "string") { res.status(400).json({ error: input }); return; }
-  const q = quote(input);
-  res.json({ tusdm: q.tusdm, ada: q.ada, duration_seconds: q.durationSeconds, resolution: q.resolution, complexity: q.complexity, breakdown: q.breakdown, max_iterations_per_hire: MAX_ITERATIONS });
+app.post("/quote", quoteLimit, async (req, res) => {
+  const resolved = await resolveInput(req.body?.input_data ?? req.body).catch((e: Error) => `could not read the attached files: ${e.message}`);
+  if (typeof resolved === "string") { res.status(400).json({ error: resolved }); return; }
+  const q = resolved.quote;
+  res.json({ derived_prompt: resolved.input.source_files ? resolved.input.prompt : undefined, source_files: resolved.input.source_files, mode: q.mode, tusdm: q.tusdm, ada: q.ada, duration_seconds: q.durationSeconds, resolution: q.resolution, complexity: q.complexity, breakdown: q.breakdown, max_iterations_per_hire: MAX_ITERATIONS });
 });
 
 /** Revision on a delivered hire. The job id (returned only to the buyer) is the access key. */
@@ -382,9 +402,10 @@ app.get("/jobs", (req, res) => {
 for (const offer of offers) {
   const gate = paymentMiddlewareFromHTTPServer(offer.http, undefined, undefined, false);
   app.post(offer.path, quoteLimit, (req, res, next) => {
-    const input = parseVideoInput(req.body?.input_data ?? req.body);
-    if (typeof input === "string") res.status(400).json({ error: input }); else next();
-  }, gate, (req, res, next) => { try { res.json(view(x402Job(req))); } catch (e) { next(e); } });
+    const raw = req.body?.input_data ?? req.body;
+    const input = parseVideoInput(raw);
+    if (typeof input === "string" && !fileUrls(raw).length) res.status(400).json({ error: input }); else next();
+  }, gate, async (req, res, next) => { try { res.json(view(await x402Job(req))); } catch (e) { next(e); } });
 }
 
 app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {

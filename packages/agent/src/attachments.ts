@@ -4,18 +4,19 @@
  * file names/URLs never inflate the price or pollute the generation prompt, and
  * images can drive image-to-video.
  */
-export interface Attachments { text: string; images: string[]; videos: string[]; other: string[] }
+export interface Attachments { text: string; images: string[]; videos: string[]; documents: string[]; other: string[] }
 
 const IMAGE = /\.(png|jpe?g|webp|gif|bmp|avif)(\?|#|$)/i;
 const VIDEO = /\.(mp4|mov|webm|m4v|mkv)(\?|#|$)/i;
+const DOC = /\.(pdf|docx|txt|md|markdown|csv|json)(\?|#|$)/i;
 
 export function extractAttachments(description: string): Attachments {
-  const images: string[] = [], videos: string[] = [], other: string[] = [];
+  const images: string[] = [], videos: string[] = [], documents: string[] = [], other: string[] = [];
   const add = (url: string) => {
     const u = url.trim();
     if (!/^https:\/\//i.test(u)) return;
     const path = u.split(/[?#]/)[0];
-    const bucket = IMAGE.test(path) ? images : VIDEO.test(path) ? videos : other;
+    const bucket = IMAGE.test(path) ? images : VIDEO.test(path) ? videos : DOC.test(path) ? documents : other;
     if (!bucket.includes(u)) bucket.push(u);
   };
   // Markdown links / images, including names that wrap across a line break: [name\n](url)
@@ -23,5 +24,5 @@ export function extractAttachments(description: string): Attachments {
   // Bare URLs
   text = text.replace(/https?:\/\/[^\s)]+/g, url => { add(url); return " "; });
   text = text.replace(/\s+/g, " ").trim();
-  return { text, images, videos, other };
+  return { text, images, videos, documents, other };
 }

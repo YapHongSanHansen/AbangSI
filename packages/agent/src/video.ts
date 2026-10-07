@@ -27,6 +27,11 @@ export const INPUT_SCHEMA = {
       validations: [{ validation: "min", value: "1" }, { validation: "max", value: "1" }],
     },
     {
+      id: "files", type: "file", name: "Files (optional)",
+      data: { outputFormat: "url", description: "Brief, script or product sheet (PDF, DOCX, TXT, MD, CSV) — ReelForge reads it and writes the video prompt from it. Add photos to animate them, or a video + photos to swap the people in the video." },
+      validations: [{ validation: "optional", value: "true" }, { validation: "accept", value: ".pdf,.docx,.txt,.md,.csv,.json,image/*,video/mp4,video/quicktime" }, { validation: "max", value: "12" }],
+    },
+    {
       id: "image_url", type: "url", name: "Reference image (optional)",
       data: { placeholder: "https://…/photo.jpg", description: "Animate this image (image-to-video) instead of generating from text only" },
       validations: [{ validation: "optional", value: "true" }],
