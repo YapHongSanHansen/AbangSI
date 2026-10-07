@@ -421,12 +421,17 @@ for (const job of store.all()) {
   if (job.channel === "sokosumi" && !job.sokosumiSeenAt && job.log.some(l => l.includes("reported to Sokosumi"))) store.update(job.id, { sokosumiSeenAt: new Date().toISOString() });
 }
 for (const offer of offers) { await offer.server.initialize(); await offer.http.initialize(); }
-setInterval(() => { void watch(); }, 10_000);
-setInterval(() => { void collect(); }, 30_000);
+/** EXECUTOR_ENABLED=0 serves HTTP only (standby/staging): no watcher, collector or Sokosumi runtime — one executor per seller. */
+const executor = optional("EXECUTOR_ENABLED", "1") !== "0";
+if (executor) {
+  setInterval(() => { void watch(); }, 10_000);
+  setInterval(() => { void collect(); }, 30_000);
+}
 app.listen(port, () => {
   console.log(`ReelForge on http://localhost:${port}  public ${publicUrl()}`);
   console.log(`  seller  ${seller.address}\n  agent   ${agentId ?? "(not registered)"}\n  escrow  ${ESCROW_ADDRESS}`);
   console.log(`  x402    ${offers.map(o => `${o.path} (${o.price})`).join(", ")}  · max ${MAX_ITERATIONS} generations per hire`);
+  if (!executor) { console.log("  EXECUTOR_ENABLED=0 — standby: HTTP only, no settlement or Sokosumi runtime"); return; }
   void watch(); void collect();
   if (agentId) startCoworkerRuntime({ agentIdentifier: agentId, sellerAddress: seller.address, sign: seller.signTerms });
 });
