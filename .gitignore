@@ -1,0 +1,20 @@
+node_modules/
+.env
+.env.*
+!.env.example
+env file
+*.sk
+*.mnemonic
+wallets/
+data/
+media-store/
+dist/
+.vercel/
+.local/
+*.log
+*.tmp
+packages/editor/x/
+packages/web/test-results/
+packages/web/playwright-report/
+.playwright/
+coverage/

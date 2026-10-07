@@ -1,0 +1,42 @@
+{
+  "name": "@reelforge/web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "ReelForge site shell (Vite + React) and API server (Express): Higgsfield result -> Omniclip editor handoff",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k -n server,client,editor -c magenta,cyan,yellow \"pnpm run dev:server\" \"pnpm run dev:client\" \"pnpm run dev:editor\"",
+    "dev:server": "tsx watch server/src/index.ts",
+    "dev:client": "vite --config client/vite.config.ts",
+    "dev:editor": "pnpm --filter @reelforge/editor serve",
+    "start": "tsx server/src/index.ts",
+    "start:server": "tsx server/src/index.ts",
+    "build": "pnpm --filter @reelforge/editor build && tsc -p server/tsconfig.json && tsc -p client/tsconfig.json && vite build --config client/vite.config.ts",
+    "mock:sample": "node scripts/make-sample.mjs",
+    "test": "pnpm --filter @reelforge/higgsfield test && node --test --experimental-strip-types --no-warnings \"server/test/**/*.test.ts\"",
+    "test:e2e": "node scripts/e2e.mjs"
+  },
+  "dependencies": {
+    "@reelforge/higgsfield": "workspace:*",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.0",
+    "express": "^4.21.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^24.0.0",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "ffmpeg-static": "^5.2.0",
+    "ffprobe-static": "^3.1.0",
+    "playwright": "^1.49.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.9.0",
+    "vite": "^6.0.0"
+  }
+}
