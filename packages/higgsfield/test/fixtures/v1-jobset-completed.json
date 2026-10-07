@@ -1,0 +1,1 @@
+{"id":"js_123","type":"image2video","created_at":"2026-01-01T00:00:00Z","jobs":[{"id":"job_1","status":"completed","results":{"min":{"type":"image","url":"https://cdn.example.com/thumb.webp"},"raw":{"type":"video","url":"https://cdn.example.com/raw.mp4"}}}]}

@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<!-- ReelForge: base = directory of this page, so the editor works at / (own origin) or under /editor/ (same origin as the site) -->
+	<script>document.write('<base href="' + location.pathname.replace(/[^/]*$/, '') + '">')</script>
+	<title>ReelForge Editor</title>
+	<link rel="icon" type="image/png" href="assets/icon3.png">
+	<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.0/cdn/themes/dark.css">
+	<script type="module" src="https://cdn.jsdelivr.net/npm/@shoelace-style/shoelace@2.20.0/cdn/shoelace.js"></script>
+	<!-- PIXI is loaded globally from CDN because pixi-filters / transformer rely on the global build (upstream Omniclip choice) -->
+	<script src="https://cdn.jsdelivr.net/npm/pixi.js@7.4.2/dist/pixi.min.js"></script>
+	<script src="https://cdn.jsdelivr.net/npm/pixi-filters@5.3.0/dist/browser/pixi-filters.min.js"></script>
+	<script src="https://cdn.jsdelivr.net/npm/@pixi/graphics-extras@7.1.4/dist/graphics-extras.min.js"></script>
+	<script src="https://cdn.jsdelivr.net/npm/@pixi-essentials/object-pool@1.0.1/dist/pixi-object-pool.js"></script>
+	<script src="https://cdn.jsdelivr.net/npm/@pixi-essentials/bounds@3.0.0/dist/bounds.js"></script>
+	<script src="https://cdn.jsdelivr.net/npm/@pixi-essentials/transformer@3.0.2/dist/transformer.js"></script>
+	<!-- ReelForge: runtime config (allowed parent origins / media origins), served by scripts/serve.mjs -->
+	<script src="reelforge-config.js"></script>
+	<!-- ReelForge: coi-serviceworker removed. Export uses the single-threaded ffmpeg core, which does not need
+	     SharedArrayBuffer, and the service-worker reload misbehaves inside the site iframe. -->
+	<script type="importmap-shim" src="./importmap.json"></script>
+	<script defer src="https://cdn.jsdelivr.net/npm/es-module-shims@1.8.2/dist/es-module-shims.min.js"></script>
+	<script type="module-shim" src="./main.js"></script>
+	<link rel="stylesheet" href="index.css">
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@200;400;500;700;800&display=swap" rel="stylesheet">
+</head>
+<body>
+	<div class="loading-page-indicator">
+		<div class="rf-loader-logo">Reel<b>Forge</b></div>
+		<div class="loader"><div class="loaderBar"></div></div>
+	</div>
+</body>
+</html>
