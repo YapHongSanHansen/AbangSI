@@ -17,7 +17,7 @@ import {
   Address, Assets, Client, Data, InlineDatum, KeyHash, preprod, ScriptHash, SlotConfig, Time,
   TransactionHash, TransactionInput, type TransactionMetadatum, type UTxO,
 } from "@evolution-sdk/evolution";
-import { MASUMI_DEFAULT_DEPLOYMENT, parseMasumiLockDatum, type MasumiDatumView } from "@x402/cardano";
+import { MASUMI_DEFAULT_DEPLOYMENT, MASUMI_MIN_COLLATERAL_LOVELACE, parseMasumiLockDatum, type MasumiAddressCredentials, type MasumiDatumView } from "@x402/cardano";
 import type { Blockfrost } from "./config.js";
 import { ESCROW_ADDRESS, paymentKeyHash, REGISTRY_POLICY_ID, unitKey } from "./constants.js";
 import { assertCanonicalContracts, paymentScript, registryScript } from "./contracts.js";
@@ -71,8 +71,14 @@ export function lockMismatch(lock: EscrowLock, e: ExpectedLock): string | null {
   if (d.state !== STATE.FundsLocked) return `state ${d.state} is not FundsLocked`;
   if (d.resultHash !== "" || d.sellerCooldownTime !== 0n || d.buyerCooldownTime !== 0n) return "not a fresh lock";
   if (d.seller.payment.isScript || d.seller.payment.hash !== paymentKeyHash(e.sellerAddress)) return "seller mismatch";
-  if (d.buyer.payment.isScript) return "buyer is a script";
   if (d.sellerReturnAddress !== null) return "unexpected seller return address";
+  // Payout targets must be key-only, non-pointer addresses, or Withdraw can become impossible
+  // (vested_pay re-parses outputs at the escrow address; pointers can't be rebuilt off-chain).
+  for (const a of [d.buyer, d.buyerReturnAddress] as Array<MasumiAddressCredentials | null>) {
+    if (a && (a.pointer || a.payment.isScript || a.stake?.isScript)) return "buyer/return address must be key-only without pointer";
+  }
+  if (d.collateralReturnLovelace < 0n) return "negative collateral";
+  if (d.collateralReturnLovelace !== 0n && d.collateralReturnLovelace < MASUMI_MIN_COLLATERAL_LOVELACE) return "collateral below Masumi floor";
   const eq: Array<[string, unknown, unknown]> = [
     ["reference_key", d.referenceKey, e.referenceKey], ["reference_signature", d.referenceSignature, e.referenceSignature],
     ["seller_nonce", d.sellerNonce, e.sellerNonce], ["buyer_nonce", d.buyerNonce, e.buyerNonce],
@@ -82,6 +88,7 @@ export function lockMismatch(lock: EscrowLock, e: ExpectedLock): string | null {
   ];
   for (const [name, got, want] of eq) if (String(got).toLowerCase() !== String(want).toLowerCase()) return `${name} mismatch`;
   const key = unitKey(e.unit);
+  if (Object.keys(lock.tokens).some(k => unitKey(k) !== key)) return "unexpected native tokens in escrow";
   const paid = key === "" ? lock.lovelace - d.collateralReturnLovelace : lock.tokens[key] ?? 0n;
   if (paid < e.amount) return `paid ${paid} < ${e.amount} of ${e.unit}`;
   if (d.collateralReturnLovelace > lock.lovelace) return "collateral exceeds locked lovelace";
@@ -198,7 +205,7 @@ export function createChain(cfg: { blockfrost: Blockfrost; mnemonic: string; sel
     const utxo = lock.utxo, d = lock.datum;
     if (!d || !(utxo.datumOption instanceof InlineDatum.InlineDatum)) throw new Error("lock has no inline datum");
     if (d.seller.payment.hash !== sellerVkh) throw new Error("lock belongs to another seller");
-    if (d.state !== STATE.FundsLocked && d.state !== STATE.ResultSubmitted) throw new Error(`cannot submit from state ${d.state}`);
+    if (d.state !== STATE.FundsLocked && d.state !== STATE.ResultSubmitted && d.state !== STATE.RefundRequested) throw new Error(`cannot submit from state ${d.state}`);
     const now = await tipMs();
     const earliest = ceilToSlotMs(d.sellerCooldownTime);
     const from = now - 60_000n > earliest ? now - 60_000n : earliest;
@@ -222,8 +229,8 @@ export function createChain(cfg: { blockfrost: Blockfrost; mnemonic: string; sel
   const withdraw = (lock: EscrowLock) => serial(async () => {
     const d = lock.datum!;
     const now = await tipMs();
-    const from = ceilToSlotMs(d.unlockTime);
-    if (now < from) throw new Error("unlock time not reached");
+    const from = d.state === STATE.WithdrawAuthorized ? now - 60_000n : ceilToSlotMs(d.unlockTime);
+    if (now < from && d.state !== STATE.WithdrawAuthorized) throw new Error("unlock time not reached");
     let tx = client.newTx()
       .collectFrom({ inputs: [lock.utxo], redeemer: REDEEMER.withdraw })
       .attachScript({ script: paymentScript() })
@@ -243,13 +250,30 @@ export function createChain(cfg: { blockfrost: Blockfrost; mnemonic: string; sel
     return finish(await tx.build({ changeAddress: seller, availableUtxos: await spendable() }), h => log(`withdraw submitted ${h}`));
   });
 
-  /** Locks of this seller that are ResultSubmitted and past unlock_time. */
-  async function dueForCollection(): Promise<EscrowLock[]> {
-    const [locks, now] = await Promise.all([allLocks(), tipMs()]);
-    return locks.filter(l => l.datum && l.datum.state === STATE.ResultSubmitted && l.datum.resultHash !== ""
-      && !l.datum.seller.payment.isScript && l.datum.seller.payment.hash === sellerVkh && l.datum.sellerReturnAddress === null
-      && !l.datum.buyer.pointer && !l.datum.buyerReturnAddress?.pointer && l.datum.collateralReturnLovelace <= l.lovelace
-      && now >= ceilToSlotMs(l.datum.unlockTime));
+  /**
+   * The escrow UTxO our own SubmitResult created (unspent output of resultTx at the escrow),
+   * if it is still ours, ResultSubmitted (or buyer-authorized) and withdrawable now.
+   */
+  async function collectible(resultTx: string): Promise<{ lock: EscrowLock | null; reason: string }> {
+    const [lock] = await locksOfTx(resultTx);
+    if (!lock?.datum) return { lock: null, reason: "no unspent escrow output (already withdrawn, disputed or moved)" };
+    const d = lock.datum;
+    if (d.seller.payment.isScript || d.seller.payment.hash !== sellerVkh || d.sellerReturnAddress !== null) return { lock: null, reason: "not ours" };
+    if (d.resultHash === "") return { lock: null, reason: "no result hash" };
+    if (d.collateralReturnLovelace > 0n && (d.buyerReturnAddress ?? d.buyer).pointer) return { lock: null, reason: "pointer buyer address" };
+    if (d.state === STATE.WithdrawAuthorized) return { lock, reason: "" };
+    if (d.state !== STATE.ResultSubmitted) return { lock: null, reason: `state ${d.state}` };
+    if ((await tipMs()) < ceilToSlotMs(d.unlockTime)) return { lock: null, reason: "unlock time not reached" };
+    return { lock, reason: "" };
+  }
+
+  /**
+   * Re-resolves a job's escrow by identity (seller nonce + reference signature), because a
+   * buyer action (e.g. SetRefundRequested) moves it to a new out-ref.
+   */
+  async function resolveByIdentity(sellerNonce: string, referenceSignature: string, unit: string): Promise<EscrowLock | null> {
+    const pool = unitKey(unit) === "" ? await allLocks() : await locksWithUnit(unit);
+    return pool.find(l => l.datum?.sellerNonce === sellerNonce && l.datum.referenceSignature === referenceSignature.toLowerCase()) ?? null;
   }
 
   /** Refreshes a lock by out-ref (after SubmitResult the escrow UTxO is a new output). */
@@ -258,6 +282,6 @@ export function createChain(cfg: { blockfrost: Blockfrost; mnemonic: string; sel
     return u ? toLock(u) : null;
   }
 
-  return { tipMs, locksOfTx, locksWithUnit, allLocks, lockByRef, register, deregister, submitResult, withdraw, dueForCollection, sellerVkh };
+  return { tipMs, locksOfTx, locksWithUnit, allLocks, lockByRef, resolveByIdentity, collectible, register, deregister, submitResult, withdraw, sellerVkh };
 }
 export type Chain = ReturnType<typeof createChain>;

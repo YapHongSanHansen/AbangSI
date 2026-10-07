@@ -106,7 +106,7 @@ export function startCoworkerRuntime(opts: { agentIdentifier: string; sellerAddr
   /** Reports finished/failed jobs back to their Sokosumi Task (once). */
   async function report(job: Job) {
     if (!job.sokosumiTaskId || job.log.some(l => l.includes("reported to Sokosumi"))) return;
-    if (job.status === "completed" && job.result && job.resultTx) {
+    if (job.status === "completed" && job.result && job.resultTx && (job.resultConfirmed || job.resultTx === "unpaid")) {
       await event(job.sokosumiTaskId, { status: "COMPLETED", comment: job.result });
       store.update(job.id, {}, `reported to Sokosumi (COMPLETED); result hash ${job.resultHash} on chain in ${job.resultTx}`);
     } else if (job.status === "failed") {

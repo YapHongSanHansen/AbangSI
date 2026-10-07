@@ -38,6 +38,8 @@ export interface Job {
   result?: string;
   resultHash?: string;
   resultTx?: string;
+  /** True once the SubmitResult carrying resultHash is confirmed on chain. */
+  resultConfirmed?: boolean;
   collectTx?: string;
   sokosumiTaskId?: string;
   error?: string;

@@ -89,7 +89,7 @@ const offers = [
 
 /** Records a verified x402 payment as a job (runs before settlement, and again on retries: idempotent). */
 function x402Job(req: Request): Job {
-  const payment = decodePaymentSignatureHeader(req.get("PAYMENT-SIGNATURE")!);
+  const payment = decodePaymentSignatureHeader((req.get("PAYMENT-SIGNATURE") ?? req.get("X-PAYMENT"))!);
   const { txHash } = decodeCardanoTransaction(String(payment.payload.transaction));
   const existing = store.find(j => j.lockTx === txHash);
   if (existing) return existing;
@@ -111,9 +111,17 @@ function x402Job(req: Request): Job {
 }
 
 // ---------------------------------------------------------------- settlement watcher
+//
+// Each paid job runs independently (bounded by the tx queue in chain.ts):
+//   awaiting_payment → lock found & matches signed terms → running (generate once, reuse on retry)
+//   → SubmitResult → confirmed on chain → completed (only now is the result revealed).
+// A job is re-resolved by escrow identity before submitting, so a buyer's SetRefundRequested
+// cannot strand it: SubmitResult from RefundRequested moves the escrow to Disputed.
 
-const SUBMIT_MARGIN_MS = 4 * 60_000;
+/** Stop generating this long before submit_result_time (leaves room for SubmitResult + confirmation). */
+const SUBMIT_MARGIN_MS = 10 * 60_000;
 const ignored = new Set<string>();
+const inFlight = new Set<string>();
 
 function expectedOf(job: Job): ExpectedLock {
   const e = job.expected!;
@@ -137,75 +145,139 @@ async function findLock(job: Job, tusdmLocks: () => Promise<EscrowLock[]>): Prom
   return null;
 }
 
+/** The job's escrow as it is now: original out-ref if unspent, else found by identity. Must be unresolved by us yet. */
+async function currentLock(job: Job): Promise<EscrowLock | null> {
+  const e = expectedOf(job);
+  const original = job.lockTx !== undefined && job.lockIndex !== undefined ? await chain.lockByRef(job.lockTx, job.lockIndex) : null;
+  const lock = original ?? await chain.resolveByIdentity(e.sellerNonce, e.referenceSignature, e.unit);
+  if (!lock?.datum) return null;
+  // Immutable terms must still match what we signed (state may legitimately be RefundRequested).
+  const asFresh = { ...lock, datum: { ...lock.datum, state: STATE.FundsLocked, buyerCooldownTime: 0n } };
+  const why = lockMismatch(asFresh, e);
+  if (why) throw new Error(`escrow no longer matches terms: ${why}`);
+  return lock;
+}
+
+async function confirmSubmitted(job: Job): Promise<boolean> {
+  const [cont] = await chain.locksOfTx(job.resultTx!);
+  if (cont?.datum && cont.datum.resultHash === job.resultHash) return true;
+  // Spent already (e.g. collected) also proves it landed.
+  const r = await fetch(`${blockfrost.baseUrl}/txs/${job.resultTx}`, { headers: { project_id: blockfrost.projectId } });
+  return r.ok;
+}
+
 async function advance(job: Job, tusdmLocks: () => Promise<EscrowLock[]>) {
   const e = job.expected!;
-  if (Date.now() > Number(e.submitResultTime) - SUBMIT_MARGIN_MS) {
-    store.update(job.id, { status: "failed", error: job.error ?? "No valid escrow lock arrived before the result deadline (buyer can reclaim via WithdrawRefund)." }, "deadline passed without a lock");
+  // Resume: a SubmitResult that was sent but not yet seen confirmed.
+  if (job.status === "running" && job.resultTx) {
+    if (await confirmSubmitted(job)) { store.update(job.id, { status: "completed", resultConfirmed: true }, `SubmitResult confirmed ${job.resultTx}`); return; }
+    if (Date.now() < job.updatedAt + 10 * 60_000) return; // still propagating
+    store.update(job.id, { resultTx: undefined }, "SubmitResult never landed — will resubmit");
+  }
+  if (Date.now() > Number(e.submitResultTime) - 3 * 60_000) {
+    store.update(job.id, { status: "failed", error: job.error ?? "Result deadline passed without a confirmed result (buyer can reclaim via WithdrawRefund)." }, "deadline passed");
     return;
   }
-  const lock = await findLock(job, tusdmLocks);
-  if (!lock) {
-    if (job.channel === "x402" && Date.now() > Number(e.payByTime) + 5 * 60_000) {
-      store.update(job.id, { status: "failed", error: "Payment transaction never landed before its pay-by time." }, "x402 lock never landed");
+  let lock: EscrowLock | null;
+  if (job.status === "awaiting_payment") {
+    lock = await findLock(job, tusdmLocks);
+    if (!lock) {
+      // Unpaid quotes expire shortly after their pay-by time.
+      if (Date.now() > Number(e.payByTime) + 10 * 60_000) store.update(job.id, { status: "failed", error: "No escrow payment arrived before the pay-by time." }, "quote expired unpaid");
+      return;
     }
-    return;
+    store.update(job.id, { status: "running", lockTx: lock.txHash, lockIndex: lock.outputIndex }, `escrow FundsLocked ${lock.txHash}#${lock.outputIndex}`);
   }
-  store.update(job.id, { status: "running", lockTx: lock.txHash, lockIndex: lock.outputIndex }, `escrow FundsLocked ${lock.txHash}#${lock.outputIndex} — generating video`);
-  const video = await generateVideo(job.input, Number(e.submitResultTime) - SUBMIT_MARGIN_MS);
-  const result = resultText(video.videoUrl, video.generationId, job.input);
-  const hash = resultHash(job.nonce, result);
-  store.update(job.id, { generationId: video.generationId, videoUrl: video.videoUrl, result, resultHash: hash }, `video ready ${video.videoUrl}`);
-  const tx = await chain.submitResult(lock, hash, h => store.update(job.id, { resultTx: h }, `SubmitResult submitted ${explorerTx(h)}`));
-  store.update(job.id, { status: "completed", resultTx: tx }, `SubmitResult confirmed ${tx}`);
+  // Generate once; a retry after a later failure reuses the stored video.
+  if (!job.videoUrl || !job.resultHash) {
+    const before = await currentLock(job);
+    if (!before) throw new Error("escrow not found");
+    if (before.datum!.state !== STATE.FundsLocked) {
+      store.update(job.id, { status: "failed", error: `Escrow state ${before.datum!.state} before work started (refund requested) — not generating.` }, "refund requested before work; skipped");
+      return;
+    }
+    store.update(job.id, {}, "generating video");
+    const video = await generateVideo(job.input, Number(e.submitResultTime) - SUBMIT_MARGIN_MS);
+    const result = resultText(video.videoUrl, video.generationId, job.input);
+    store.update(job.id, { generationId: video.generationId, videoUrl: video.videoUrl, result, resultHash: resultHash(job.nonce, result) }, "video ready (withheld until the result hash is confirmed on chain)");
+  }
+  const fresh = store.get(job.id)!;
+  const lockNow = await currentLock(fresh);
+  if (!lockNow) throw new Error("escrow not found before SubmitResult");
+  await chain.submitResult(lockNow, fresh.resultHash!, h => store.update(job.id, { resultTx: h }, `SubmitResult submitted ${explorerTx(h)}`));
+  store.update(job.id, { status: "completed", resultConfirmed: true }, `SubmitResult confirmed ${store.get(job.id)!.resultTx}`);
 }
 
-let watching = false;
+let scanning = false;
 async function watch() {
-  if (watching) return;
-  watching = true;
+  if (scanning) return;
+  scanning = true;
   try {
-    const waiting = store.all().filter(j => j.status === "awaiting_payment" && j.expected);
+    const due = store.all().filter(j => (j.status === "awaiting_payment" || j.status === "running") && j.expected && !inFlight.has(j.id));
     let cache: Promise<EscrowLock[]> | undefined;
     const tusdmLocks = () => (cache ??= chain.locksWithUnit(TUSDM_UNIT));
-    for (const job of waiting) {
-      try { await advance(job, tusdmLocks); }
-      catch (error) {
-        const msg = error instanceof Error ? error.message : String(error);
-        const j = store.get(job.id)!;
-        if (j.resultTx) { console.warn(`[job ${job.id.slice(0, 8)}] SubmitResult pending: ${msg}`); store.update(job.id, { status: "completed" }); continue; }
-        store.update(job.id, { status: "awaiting_payment", error: msg }, `retrying: ${msg}`);
-      }
+    for (const job of due) {
+      inFlight.add(job.id);
+      void advance(job, tusdmLocks)
+        .catch(error => {
+          const msg = error instanceof Error ? error.message : String(error);
+          const j = store.get(job.id)!;
+          // Keep 'running' (the video is reused); never regress a confirmed job.
+          if (j.status !== "completed") store.update(job.id, { error: msg }, `will retry: ${msg}`);
+        })
+        .finally(() => inFlight.delete(job.id));
     }
-  } finally { watching = false; }
+  } finally { scanning = false; }
 }
 
+/** Withdraws only escrows our own SubmitResult created; pauses while any job is mid-flight (tx queue priority). */
 let collecting = false;
 async function collect() {
-  if (collecting) return;
+  if (collecting || store.all().some(j => j.status === "running")) return;
   collecting = true;
   try {
-    for (const lock of await chain.dueForCollection()) {
+    for (const job of store.all().filter(j => j.resultConfirmed && j.resultTx && j.resultTx !== "unpaid" && !j.collectTx)) {
       try {
+        const { lock, reason } = await chain.collectible(job.resultTx!);
+        if (!lock) { if (reason.startsWith("no unspent")) store.update(job.id, { collectTx: "unknown-spent" }, `escrow output spent: ${reason}`); continue; }
+        const e = expectedOf(job);
+        const key = e.unit.toLowerCase().replace(".", "");
+        const value = key === "lovelace" ? lock.lovelace - lock.datum!.collateralReturnLovelace : lock.tokens[key] ?? 0n;
+        if (value < e.amount) { console.warn(`[collect] ${job.id.slice(0, 8)} escrow holds ${value} < price ${e.amount}; skipped`); continue; }
         const tx = await chain.withdraw(lock);
-        const job = store.find(j => j.resultTx === lock.txHash || (j.lockTx === lock.txHash && j.lockIndex === lock.outputIndex));
-        if (job) store.update(job.id, { collectTx: tx }, `seller collected ${explorerTx(tx)}`);
-        else console.log(`[collect] withdrew ${lock.txHash}#${lock.outputIndex} → ${tx}`);
-      } catch (error) { console.warn(`[collect] ${lock.txHash}#${lock.outputIndex}: ${error instanceof Error ? error.message : error}`); }
+        store.update(job.id, { collectTx: tx }, `seller collected ${explorerTx(tx)}`);
+      } catch (error) { console.warn(`[collect] ${job.id.slice(0, 8)}: ${error instanceof Error ? error.message : error}`); }
     }
-  } catch (error) { console.warn(`[collect] scan failed: ${error instanceof Error ? error.message : error}`); }
-  finally { collecting = false; }
+  } finally { collecting = false; }
 }
+
+/** Per-IP fixed-window limiter for unauthenticated, quote-issuing routes. */
+function rateLimit(max: number, windowMs: number) {
+  const hits = new Map<string, { n: number; reset: number }>();
+  return (req: Request, res: Response, next: NextFunction) => {
+    if (req.get("PAYMENT-SIGNATURE") || req.get("X-PAYMENT")) return next();
+    const ip = req.ip ?? "?";
+    const now = Date.now();
+    const h = hits.get(ip);
+    if (!h || h.reset < now) hits.set(ip, { n: 1, reset: now + windowMs });
+    else if (++h.n > max) { res.status(429).json({ error: "Too many quote requests; slow down." }); return; }
+    if (hits.size > 10_000) for (const [k, v] of hits) if (v.reset < now) hits.delete(k);
+    next();
+  };
+}
+const quoteLimit = rateLimit(20, 60_000);
 
 // ---------------------------------------------------------------- HTTP
 
 const app = express();
-app.set("trust proxy", true);
+app.set("trust proxy", "loopback");
 app.use(cors({ exposedHeaders: ["PAYMENT-REQUIRED", "PAYMENT-RESPONSE"], allowedHeaders: ["Content-Type", "PAYMENT-SIGNATURE", "X-PAYMENT"] }));
 app.use(express.json({ limit: "32kb" }));
 app.use("/media", express.static(MEDIA_DIR, { immutable: true, maxAge: "365d", setHeaders: r => r.setHeader("Cross-Origin-Resource-Policy", "cross-origin") }));
 
 const view = (j: Job) => ({
-  job_id: j.id, id: j.id, channel: j.channel, status: j.status, input: j.input, video_url: j.videoUrl, result: j.result,
+  job_id: j.id, id: j.id, channel: j.channel, status: j.status, input: j.input,
+  ...(j.status === "completed" && j.resultConfirmed ? { video_url: j.videoUrl, result: j.result } : {}),
   identifierFromPurchaser: j.nonce, input_hash: j.inputHash, result_hash: j.resultHash, blockchainIdentifier: j.blockchainIdentifier,
   escrow: ESCROW_ADDRESS, lock_tx: j.lockTx, result_tx: j.resultTx, collect_tx: j.collectTx, error: j.error, log: j.log,
   deadlines: j.expected && { payByTime: j.expected.payByTime, submitResultTime: j.expected.submitResultTime, unlockTime: j.expected.unlockTime, externalDisputeUnlockTime: j.expected.externalDisputeUnlockTime },
@@ -225,7 +297,7 @@ app.get("/availability", (_req, res) => {
 app.get("/input_schema", (_req, res) => { res.json(INPUT_SCHEMA); });
 
 /** MIP-003 start_job (standard Masumi path, priced Dynamic in tUSDM). */
-app.post("/start_job", async (req, res, next) => {
+app.post("/start_job", quoteLimit, async (req, res, next) => {
   try {
     if (!agentId) { res.status(503).json({ error: "Agent not registered yet (MASUMI_AGENT_IDENTIFIER unset)." }); return; }
     const nonce = String(req.body?.identifier_from_purchaser ?? "").toLowerCase();
@@ -262,15 +334,19 @@ app.post("/start_job", async (req, res, next) => {
 app.get("/status", (req, res) => {
   const job = store.get(String(req.query.job_id ?? ""));
   if (!job) { res.status(404).json({ error: "Unknown job_id" }); return; }
-  res.json({ job_id: job.id, status: job.status, ...(job.status === "completed" && job.result ? { result: job.result } : {}), ...(job.error && job.status === "failed" ? { message: job.error } : {}) });
+  res.json({ job_id: job.id, status: job.status, ...(job.status === "completed" && job.resultConfirmed && job.result ? { result: job.result } : {}), ...(job.error && job.status === "failed" ? { message: job.error } : {}) });
 });
 app.post("/provide_input", (_req, res) => { res.status(400).json({ error: "ReelForge never requests additional input" }); });
 app.get("/jobs/:id", (req, res) => { const j = store.get(req.params.id); if (j) res.json(view(j)); else res.status(404).json({ error: "Unknown job" }); });
-app.get("/jobs", (_req, res) => { res.json(store.all().slice(-50).reverse().map(view)); });
+app.get("/jobs", (req, res) => {
+  const admin = optional("ADMIN_TOKEN");
+  if (!admin || req.get("authorization") !== `Bearer ${admin}`) { res.status(401).json({ error: "admin token required" }); return; }
+  res.json(store.all().slice(-50).reverse().map(view));
+});
 
 for (const offer of offers) {
   const gate = paymentMiddlewareFromHTTPServer(offer.http, undefined, undefined, false);
-  app.post(offer.path, (req, res, next) => {
+  app.post(offer.path, quoteLimit, (req, res, next) => {
     const input = parseVideoInput(req.body?.input_data ?? req.body);
     if (typeof input === "string") res.status(400).json({ error: input }); else next();
   }, gate, (req, res, next) => { try { res.json(view(x402Job(req))); } catch (e) { next(e); } });
@@ -281,6 +357,9 @@ app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
   res.status(500).json({ error: "ReelForge could not process this request." });
 });
 
+for (const job of store.all()) {
+  if (job.status === "completed" && job.resultTx && job.resultConfirmed === undefined && job.log.some(l => l.includes("SubmitResult confirmed"))) store.update(job.id, { resultConfirmed: true });
+}
 for (const offer of offers) { await offer.server.initialize(); await offer.http.initialize(); }
 setInterval(() => { void watch(); }, 10_000);
 setInterval(() => { void collect(); }, 120_000);

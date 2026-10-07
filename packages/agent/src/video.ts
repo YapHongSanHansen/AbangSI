@@ -79,7 +79,7 @@ export async function generateVideo(input: VideoInput, deadlineMs: number): Prom
 
 /** Single-line, escape-free result text (so escaped and raw MIP-004 hashes coincide). */
 export function resultText(videoUrl: string, generationId: string, input: VideoInput) {
-  const safe = (s: string) => s.replace(/[\u0000-\u001f"\\]/g, " ").slice(0, 160);
+  const safe = (s: string) => Array.from(s.replace(/[\u0000-\u001f"\\]/g, " ")).slice(0, 160).join("");
   const studio = optional("STUDIO_EDIT_URL");
   const edit = studio ? ` | Edit in ReelForge Studio (Omniclip): ${studio.replace("{video}", encodeURIComponent(videoUrl)).replace("{gen}", encodeURIComponent(generationId))}` : "";
   return `![ReelForge reel](${videoUrl}) ReelForge video ready (${input.aspect_ratio ?? "9:16"}): ${videoUrl}${edit} | generation ${safe(generationId)} | prompt: ${safe(input.prompt).replace(/[\[\]()]/g, " ")}`;
